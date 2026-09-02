@@ -1,0 +1,1 @@
+Paciente evoluindo bem sem informacao de data ou especialidade formatada corretamente.

@@ -1,0 +1,11 @@
+20/08/2026 08:00 - Profissional Teste Um (Medico clinico)
+Paciente internado por AVC isquemico. Solicitada avaliacao da fisioterapia e da fonoaudiologia.
+
+20/08/2026 10:00 - Profissional Teste Sete (Fisioterapeuta)
+Paciente iniciou fisioterapia motora. Boa evolucao.
+
+20/08/2026 11:00 - Profissional Teste Oito (Nutricionista)
+Paciente em dieta oral adaptada, boa aceitacao.
+
+20/08/2026 13:00 - Profissional Teste Nove (Psicologo)
+Realizado acolhimento psicologico ao paciente e familia.

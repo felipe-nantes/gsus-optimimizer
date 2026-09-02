@@ -1,0 +1,5 @@
+19/08/2026 09:00 - Profissional Teste Um (Medico clinico)
+Solicitada avaliacao da cirurgia toracica.
+
+20/08/2026 11:00 - Profissional Teste Tres (Medico cirurgiao toracico)
+Parecer da cirurgia toracica: sem indicacao cirurgica no momento. Manter seguimento ambulatorial.

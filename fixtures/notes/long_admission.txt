@@ -1,0 +1,14 @@
+10/08/2026 08:00 - Profissional Teste Um (Medico clinico)
+Paciente internado para investigacao de febre de origem indeterminada.
+
+12/08/2026 08:00 - Profissional Teste Seis (Medico infectologista)
+Avaliacao inicial: manter investigacao, coletar hemoculturas.
+
+15/08/2026 08:00 - Profissional Teste Um (Medico clinico)
+Paciente mantem febre intermitente. Solicitada tomografia de torax.
+
+18/08/2026 10:00 - Profissional Teste Dois (Medico radiologista)
+Tomografia de torax realizada, sem alteracoes significativas.
+
+20/08/2026 08:00 - Profissional Teste Um (Medico clinico)
+Paciente afebril ha 48 horas. Mantida investigacao ambulatorial apos alta.

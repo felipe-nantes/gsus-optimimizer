@@ -1,0 +1,5 @@
+19/08/2026 08:00 - Profissional Teste Um (Medico clinico)
+Solicitada tomografia de abdome para investigacao de dor abdominal.
+
+20/08/2026 10:00 - Profissional Teste Dois (Medico radiologista)
+Tomografia de abdome realizada. Sem alteracoes agudas.

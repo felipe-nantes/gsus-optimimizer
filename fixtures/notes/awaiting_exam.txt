@@ -1,0 +1,5 @@
+20/08/2026 08:00 - Profissional Teste Um (Medico clinico)
+Paciente Teste 001, prontuario 123456, leito 2A. Internado para investigacao de dor abdominal. Solicitada tomografia de abdome.
+
+20/08/2026 14:00 - Profissional Teste Um (Medico clinico)
+Paciente estavel, aguardando realizacao da tomografia de abdome solicitada.

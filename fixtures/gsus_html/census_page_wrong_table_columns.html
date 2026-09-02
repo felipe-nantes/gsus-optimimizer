@@ -1,0 +1,15 @@
+<!-- Fixture sintética: tabela com poucas colunas reais (<td>) que ainda
+assim contém o texto "Inconsistente" em algum canto (ex.: um rótulo de
+filtro avançado) -- simula o bug real do DEC-014 (seletor pegando a
+tabela errada). Deve levantar GSUSCensusError, não travar. -->
+<table>
+  <tbody>
+    <tr>
+      <td>Nº Prontuário:</td>
+      <td><input value=""></td>
+    </tr>
+    <tr>
+      <td colspan="2">Filtro: Inconsistente</td>
+    </tr>
+  </tbody>
+</table>

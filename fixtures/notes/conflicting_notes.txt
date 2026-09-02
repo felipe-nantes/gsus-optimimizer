@@ -1,0 +1,8 @@
+20/08/2026 08:00 - Profissional Teste Cinco (Tecnico de enfermagem)
+Paciente aguardando ressonancia magnetica.
+
+20/08/2026 09:00 - Profissional Teste Um (Medico clinico)
+Ressonancia magnetica realizada nesta manha, sem alteracoes.
+
+20/08/2026 15:00 - Profissional Teste Cinco (Tecnico de enfermagem)
+Paciente ainda aguardando ressonancia magnetica conforme informado pela familia.
