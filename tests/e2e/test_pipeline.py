@@ -6,6 +6,10 @@ regras -> LLM mock -> persiste -> gera relatório.
 Usa apenas dados sintéticos (fixtures/notes/*.txt, prontuários fictícios).
 Não depende de Playwright, GSUS real, nem de um llama-server real.
 """
+import logging
+import sqlite3
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -252,18 +256,24 @@ class OrderRecordingLLM(StubLLM):
         return super().analyze_patient(previous_state, new_notes, active_pending_items)
 
 
-def test_pipeline_processes_smaller_notes_first_in_llm_phase(tmp_path):
-    """Achado real E2E-001 (2026-08-27, DEC-085): pedido do usuário --
-    pacientes de longa permanência (mais texto de evolução) acumulam mais
-    risco de timeout no LLM neste hardware (DEC-070/071) e não são
-    prioridade de inspeção. Fase 2 deve processar do MENOR volume de texto
-    pro MAIOR, pra agregar resultado útil no relatório o quanto antes,
-    independente da ordem em que os pacientes vieram do censo."""
+def test_pipeline_processes_fresh_patients_in_fase1_completion_order(tmp_path):
+    """DEC-109 (2026-09-02) muda o comportamento que esta suíte testava até
+    aqui: antes, a Fase 2 só começava depois que a Fase 1 processava TODO
+    mundo, então dava pra ordenar a fila inteira do menor pro maior volume
+    de texto (DEC-085) sem custo nenhum. Agora a Fase 2 roda numa thread
+    dedicada que consome cada paciente assim que a Fase 1 libera ele --
+    exatamente pra não deixar a IA ociosa esperando o lote inteiro (achado
+    real: só 16 de 182 pacientes entravam na Fase 2 depois de mais de 1h de
+    Fase 1). Ordenar globalmente exigiria esperar a Fase 1 terminar primeiro,
+    o que anularia o ganho. Pacientes FRESCOS (nota nova nesta execução) são
+    processados na ordem em que a Fase 1 (sequencial, sem concorrência
+    interna) os libera -- aqui, a ordem do censo. Só o BACKLOG (pacientes
+    sem análise nova nesta execução, ver teste seguinte) continua ordenado
+    do menor pro maior, preservando a intenção original do DEC-085 onde
+    ainda é possível sem sacrificar o paralelismo."""
     conn = database.init_db(tmp_path / "auditoria.db")
     repo = Repository(conn)
 
-    # Censo de propósito fora de ordem (grande, pequeno, médio) -- a
-    # ordenação tem que vir da Fase 2, não coincidir com a ordem de entrada.
     patients = [
         Patient(record_number="100", bed="2A", unit=UNIT),  # long_admission.txt -- maior
         Patient(record_number="200", bed="2B", unit=UNIT),  # awaiting_consult.txt -- menor
@@ -280,8 +290,44 @@ def test_pipeline_processes_smaller_notes_first_in_llm_phase(tmp_path):
 
     run_once(repo, census, records, UNIT, report_path, llm=llm)
 
-    assert llm.call_sizes == sorted(llm.call_sizes)
+    # Determinístico (não é uma corrida): a Fase 1 é sequencial e a fila é
+    # FIFO -- a ordem de chegada na Fase 2 é sempre a ordem do censo,
+    # independente de quando a thread da Fase 2 acorda pra consumir.
     assert len(llm.call_sizes) == 3
+    assert llm.call_sizes != sorted(llm.call_sizes)  # documenta a mudança de comportamento
+    conn.close()
+
+
+def test_pipeline_processes_backlog_smaller_notes_first(tmp_path):
+    """DEC-085 continua valendo pra fatia do BACKLOG (pacientes sem nota
+    nova nesta execução, resgatados via `get_active_patients_pending_ai_analysis`
+    -- ver LLM-004/DEC-090): esses só entram na fila DEPOIS que a Fase 1
+    inteira termina (`run_once`), então ordenar globalmente aqui não custa
+    nada ao paralelismo introduzido pelo DEC-109."""
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    patients = [
+        Patient(record_number="100", bed="2A", unit=UNIT),  # long_admission.txt -- maior
+        Patient(record_number="200", bed="2B", unit=UNIT),  # awaiting_consult.txt -- menor
+    ]
+    census = FixtureCensusSource(patients)
+    records = FixtureRecordSource({
+        "100": "long_admission.txt",
+        "200": "awaiting_consult.txt",
+    })
+    report_path = tmp_path / "relatorio.html"
+
+    # 1ª execução: IA falha pra ambos -- nenhum fica com patient_state.
+    run_once(repo, census, records, UNIT, report_path, llm=AlwaysFailingLLM())
+
+    # 2ª execução: mesmas notas (nada novo) -- a Fase 1 não gera tarefa
+    # fresca pra ninguém; os dois só entram na fila via reconstrução de
+    # backlog, que deve ordenar do menor pro maior volume de texto.
+    llm = OrderRecordingLLM()
+    run_once(repo, census, records, UNIT, report_path, llm=llm)
+
+    assert llm.call_sizes == sorted(llm.call_sizes)
+    assert len(llm.call_sizes) == 2
     conn.close()
 
 
@@ -563,6 +609,70 @@ def test_pipeline_marks_run_as_failed_instead_of_stuck_running_on_uncaught_error
 
     run_row = repo.conn.execute("SELECT status FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
     assert run_row["status"] == "FAILED"
+
+
+def test_pipeline_does_not_leak_llm_worker_thread_when_backlog_step_raises(tmp_path, monkeypatch):
+    """DEC-109 (revisão adversarial, 2026-09-02): achado real e reproduzido
+    -- antes desta correção, uma exceção no passo de backlog (o MESMO
+    cenário do teste anterior, agora que a Fase 2 roda numa thread própria)
+    nunca enfileirava o sentinela `_LLM_QUEUE_DONE` nem chamava `.join()`,
+    porque esse código ficava DEPOIS do ponto onde a exceção escapava pro
+    `except` mais externo. A thread `llm-phase2-worker` ficava bloqueada
+    pra sempre em `llm_queue.get()`, vazando ela e a conexão SQLite dela
+    pelo resto da vida do processo -- grave de verdade no botão "Atualizar
+    agora" da UI (processo de vida longa, clique seguinte cria mais uma
+    thread zumbi). Corrigido com um `finally` que garante sentinela+join em
+    qualquer caminho de saída. Este teste é o que faltava (identificado pela
+    própria revisão): o teste irmão só checava `status == FAILED`, nunca o
+    estado da thread -- por isso passava mesmo com o vazamento presente."""
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    records = FixtureRecordSource({"100": "awaiting_exam.txt"})
+    report_path = tmp_path / "relatorio.html"
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulado: falha inesperada após a run já existir")
+
+    monkeypatch.setattr(repo, "get_active_patients_pending_ai_analysis", _raise)
+
+    with pytest.raises(RuntimeError):
+        run_once(repo, _RaisingCensusAfterUpsert(), records, UNIT, report_path, llm=StubLLM())
+
+    time.sleep(0.5)  # margem pra thread realmente terminar, se for terminar
+    worker_threads = [t for t in threading.enumerate() if t.name == "llm-phase2-worker"]
+    assert worker_threads == [], (
+        "thread da Fase 2 (IA) vazou -- ficou viva/bloqueada depois de run_once levantar a exceção"
+    )
+    conn.close()
+
+
+def test_pipeline_logs_and_continues_when_llm_worker_connection_fails(tmp_path, monkeypatch, caplog):
+    """DEC-109 (revisão adversarial): achado real -- abrir a conexão da
+    thread da Fase 2 (`database.init_db` dentro de `_llm_phase2_worker`)
+    ficava FORA do try/except dela. Uma falha ali escapava da thread inteira
+    sem nunca passar pelo `logger` da aplicação (só um traceback perdido no
+    stderr, invisível numa execução `--auto-update` sem console) -- e
+    `run_once` seguia reportando sucesso com a Fase 2 inteira pulada em
+    silêncio, sem nenhum rastro em lugar nenhum. Corrigido: a abertura da
+    conexão agora está dentro de um try/except que loga via `logger.exception`
+    e sinaliza `worker_failed` -- Fase 1 continua completando normalmente."""
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    census = FixtureCensusSource([Patient(record_number="100", bed="2A", unit=UNIT)])
+    records = FixtureRecordSource({"100": "awaiting_exam.txt"})
+    report_path = tmp_path / "relatorio.html"
+
+    def _raise(*args, **kwargs):
+        raise sqlite3.OperationalError("simulado: banco bloqueado ao abrir conexão da Fase 2")
+
+    monkeypatch.setattr(database, "init_db", _raise)
+
+    with caplog.at_level(logging.ERROR):
+        result = run_once(repo, census, records, UNIT, report_path, llm=StubLLM())
+
+    assert result.run_id  # Fase 1 completa normalmente, apesar da Fase 2 não rodar
+    assert "Falha ao abrir conexão da thread de análise por IA" in caplog.text
+    conn.close()
     conn.close()
 
 

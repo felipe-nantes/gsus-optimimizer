@@ -16,3 +16,4 @@ installer/build/
 installer/dist/
 installer/output/
 .claude/
+*.html.*.tmp

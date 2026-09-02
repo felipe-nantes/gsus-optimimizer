@@ -162,6 +162,16 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    # DEC-109 (revisão adversarial, 2026-09-02): antes da Fase 2 (IA) rodar
+    # numa thread própria com sua PRÓPRIA conexão, nunca havia duas conexões
+    # escrevendo neste arquivo ao mesmo tempo -- o timeout padrão do módulo
+    # `sqlite3` (5s) nunca importava na prática. Agora importa: sob
+    # contenção (duas escritas coincidindo por acaso), 5s pode não bastar no
+    # hardware fraco confirmado do alvo (DEC-070/092), fazendo uma escrita de
+    # bookkeeping (ex.: `finish_run`) levantar `OperationalError: database is
+    # locked` -- 30s dá bastante margem sem risco de travar de verdade (WAL
+    # só serializa escritores entre si, nunca bloqueia leitores).
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.row_factory = sqlite3.Row
     return conn
 

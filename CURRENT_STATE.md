@@ -1117,3 +1117,21 @@ Proxima task: design/UX da tela (pedido explicito anterior do usuario) apos a en
 **Ação corretiva em andamento:** binário corrigido reinstalado, nova execução real disparada manualmente às 07:47 (sem timeout artificial desta vez -- deixando rodar até o fim de verdade, Fase 1 + Fase 2). Censo desta execução capturou 182 pacientes, SEM disparar o novo aviso de censo incompleto -- validado como genuinamente completo pelo próprio total anunciado pelo GSUS. `mark_patients_inactive_not_in` rodou corretamente sobre um censo confiável desta vez.
 
 **Ainda não fechado nesta entrada:** aguardando esta execução terminar (Fase 1 + Fase 2) pra confirmar contagem final de ativos e cobertura de IA antes de reportar ao usuário. Ver entrada seguinte quando concluído.
+
+---
+
+## 2026-09-02 (2) — Versionamento git criado; Fase 2 (IA) paralela à Fase 1 (PERF-001/DEC-109)
+
+**Contexto operacional real:** durante a madrugada/manhã, uma execução real ficou visivelmente "parada" na janela do Firefox controlada pela automação -- usuário confirmou clicando manualmente que o GSUS estava genuinamente lento/instável naquele momento. O próprio mecanismo de retry (já existente) se recuperou sozinho, mas essa mesma execução mais tarde encontrou um `TargetClosedError` na hora de fechar o contexto do Playwright (`client.__exit__`) -- o navegador já tinha sido fechado externamente antes disso, gerando um "Atualização automática falhou" cosmético no log mesmo com Fase 1 e Fase 2 tendo terminado com sucesso minutos antes (achado registrado, não corrigido nesta sessão -- fora do escopo do pedido do usuário).
+
+**Git:** repositório inicializado pela primeira vez neste projeto (pedido do usuário, "pra reverter mais fácil"), `.gitignore` revisado a fundo antes do primeiro commit (banco, config.json, credenciais, modelos, logs, build artifacts -- tudo já excluído por um `.gitignore` que já existia no projeto, mas nunca commitado). Push feito pra `github.com/felipe-nantes/gsus-optimimizer` (identidade local configurada, e-mail noreply do GitHub usado por causa da proteção de privacidade GH007).
+
+**PERF-001/DEC-109:** pedido do usuário -- Fase 2 (IA) só começava depois que a Fase 1 inteira terminasse; numa execução de 182 pacientes isso significava só 16 entrando na Fase 2 depois de mais de 1h de Fase 1 ociosa do lado da IA. Implementada Fase 2 numa thread dedicada, consumindo fila conforme a Fase 1 libera cada paciente.
+
+**Revisão adversarial ANTES de aplicar** (23 agentes, 5 dimensões, cada achado verificado por um segundo agente cético): 18 achados confirmados, reduzidos a 4 causas reais e corrigidas -- vazamento de thread+conexão em qualquer exceção entre início da thread e o sentinela (reproduzido empiricamente pela própria revisão), abertura de conexão da thread fora do try/except dela (falha silenciosa, só stderr), ausência de `busy_timeout` (duas conexões concorrentes pela primeira vez), `.join()` sem sinal de vida. Ver DECISIONS.md DEC-109 para detalhe completo.
+
+**Testes:** +4 (2 de ordenação documentando a mudança de comportamento do DEC-085 pra pacientes frescos, 2 reproduzindo os achados graves da revisão e confirmando a correção). Suíte completa: 362 passed, repetida 5x sem flakiness.
+
+**Verificação:** rebuild + reinstalação silenciosa aplicada (12:34). Execução real disparada em produção (12:37) especificamente pra confirmar Fase 1 e Fase 2 se sobrepondo de verdade -- resultado na próxima entrada.
+
+**Resultado parcial:** PASS na revisão + testes. Verificação em produção real em andamento.

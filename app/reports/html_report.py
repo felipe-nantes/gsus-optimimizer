@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import html
 import os
+import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -252,7 +253,14 @@ def generate_report(repo: Repository, run_id: str, unit: str, output_path: Path)
     # diretório (mesma unidade -- necessário pra `os.replace` ser atômico) e
     # só troca o arquivo final quando a escrita já terminou por completo.
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = output_path.with_name(output_path.name + ".tmp")
+    # Sufixo por thread (não só por chamada): a Fase 2 (IA) agora pode rodar
+    # numa thread separada, em paralelo com a Fase 1 -- sem isto, duas
+    # chamadas concorrentes (uma de cada thread) escreveriam no MESMO
+    # `relatorio.html.tmp`, arriscando corromper o conteúdo antes do
+    # `os.replace` atômico. Cada thread tem seu próprio nome de tmp; a
+    # última a chamar `os.replace` "vence" -- inofensivo, é sempre uma
+    # regravação idempotente do mesmo relatório.
+    tmp_path = output_path.with_name(f"{output_path.name}.{threading.get_ident()}.tmp")
     tmp_path.write_text(html_content, encoding="utf-8")
     os.replace(tmp_path, output_path)
     return output_path

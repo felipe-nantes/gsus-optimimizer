@@ -502,6 +502,27 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  retroativamente quem já foi marcado inativo por engano -- próxima execução
                  real com o binário corrigido reativa sozinha via `upsert_patient`.
                  Testes: +3. Rebuild + reinstalação silenciosa aplicada.
+
+[x] PERF-001     Fase 2 (IA) rodava só depois que a Fase 1 (GSUS) terminava por completo pra
+                 TODO o lote (DEC-071/109, 2026-09-02) -- pedido explícito do usuário depois
+                 de ver só 16 de 182 pacientes entrarem na Fase 2 depois de mais de 1h de Fase
+                 1. Agora a Fase 2 roda numa thread dedicada, consumindo fila conforme a Fase 1
+                 libera cada paciente -- as duas se sobrepõem de verdade (rede vs. CPU/GPU
+                 local, recursos diferentes). Revisão adversarial ANTES de aplicar (23 agentes)
+                 confirmou 18 achados reais em 4 causas -- todas corrigidas: (1) GRAVE,
+                 reproduzido -- thread + conexão SQLite vazavam pra sempre se qualquer exceção
+                 escapasse entre o início da thread e o sentinela (`finish_run`, laço de
+                 backlog); corrigido com `finally` cobrindo tudo; (2) GRAVE -- abertura da
+                 própria conexão da thread ficava fora do try/except dela, falha ali pulava a
+                 Fase 2 inteira em silêncio (só stderr, nunca o log da aplicação); (3) ALTO --
+                 sem `busy_timeout`, duas conexões concorrentes podiam estourar o timeout padrão
+                 do sqlite3 (5s) sob contenção no hardware fraco confirmado; (4) MÉDIO -- join()
+                 sem sinal de vida periódico. Preço consciente: pacientes frescos não seguem
+                 mais a ordenação menor-primeiro do DEC-085 (só o backlog continua ordenado
+                 assim). Deferido (BAIXO, cosmético/autocorretivo): `generate_report` pode
+                 mostrar retrato momentaneamente inconsistente com dois escritores agora.
+                 Testes: +4. Suíte completa: 362 passed, repetida 5x sem flakiness. Rebuild +
+                 reinstalação silenciosa aplicada, execução real disparada em produção.
 ```
 
 ```

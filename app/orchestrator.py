@@ -12,6 +12,8 @@ BLOCKED_GSUS -- ver DECISIONS.md) quanto com fontes sintéticas em teste
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -30,6 +32,7 @@ from app.models import Note, Patient
 from app.reports import dashboard_metrics
 from app.reports.html_report import generate_report
 from app.security import pseudonym
+from app.storage import database
 from app.storage.repository import Repository
 
 logger = logging.getLogger(__name__)
@@ -171,193 +174,204 @@ def run_once(
 
         total = len(patient_ids)
         processed = 0
-        # DEC-071: coleta+regras (rápido) e análise por IA (lento -- DEC-070
-        # confirmou que o hardware alvo às vezes mal chega a 1 token/s) rodam
-        # em duas fases separadas. `llm_tasks` acumula quem precisa de
-        # análise por IA depois que a fase rápida já tiver terminado para
-        # todo mundo.
-        llm_tasks: list[tuple[str, list[StructuredNote], bool]] = []
-        while True:
-            # Achado real (auditoria de certificação pré-entrega, 2026-09-01,
-            # RESIL-011/DEC-105): confirmado no banco de PRODUÇÃO real -- várias runs
-            # tinham dezenas/centenas de pacientes presos em PENDING sem
-            # NENHUM `ERROR` correspondente, porque `repo.next_pending`
-            # (dequeue) rodava fora de qualquer try/except: uma falha de
-            # escrita SQLite aqui (lock momentâneo, disco lento) abortava a
-            # run inteira de uma vez, não isolava por paciente (RF-12). Se
-            # o PRÓPRIO dequeue falhar, não há como saber quem seria o
-            # próximo paciente pra marcar erro -- para o loop com segurança
-            # (os pacientes ainda PENDING são retomados no próximo censo,
-            # não ficam perdidos, só adiados).
-            try:
-                patient_id = repo.next_pending(run_id)
-            except Exception:
-                logger.exception("Falha ao buscar próximo paciente da fila -- interrompendo Fase 1 desta run")
-                break
-            if patient_id is None:
-                break
-            processed += 1
-            # Mesma classe de achado: `report()`/`mark_processing()` também
-            # rodavam fora do try/except por paciente logo abaixo -- uma
-            # falha aqui (callback de progresso quebrado, escrita SQLite)
-            # tinha o mesmo efeito de abortar todo mundo de uma vez. Isolado
-            # agora: falha aqui marca ESTE paciente como erro e segue pro
-            # próximo, em vez de abortar a fila inteira.
-            try:
-                report(f"Processando paciente {processed} de {total} (regras)...")
-                repo.mark_processing(run_id, patient_id)
-            except Exception as exc:
-                logger.exception(
-                    "Falha ao registrar início do processamento do paciente %s", pseudonym.for_log(patient_id),
-                )
-                try:
-                    repo.mark_error(run_id, patient_id, _safe_error_text(exc))
-                except Exception:
-                    logger.exception(
-                        "Falha também ao marcar erro do paciente %s -- pulando", pseudonym.for_log(patient_id),
-                    )
-                continue
-            try:
-                llm_input = _process_patient_rules(repo, patients_by_id[patient_id], patient_id, record_source)
-                repo.mark_done(run_id, patient_id)
-                if llm is not None and llm_input is not None:
-                    llm_notes, window_limited = llm_input
-                    llm_tasks.append((patient_id, llm_notes, window_limited))
-            except GSUSNoCurrentAdmissionDays:
-                # Não é falha técnica -- paciente sem internação atual na
-                # tela (provável alta recente, ainda no censo/fila do dia).
-                # Categoria separada no relatório, decisão do usuário -- ver
-                # DEC-054.
-                repo.mark_no_admission(run_id, patient_id)
-            except Exception as exc:  # isolamento de falha por paciente -- RF-12
-                logger.exception("Falha ao processar paciente %s", pseudonym.for_log(patient_id))
-                repo.mark_error(run_id, patient_id, _safe_error_text(exc))
-
-        repo.finish_run(run_id, "COMPLETED")
-        report("Gerando relatório (regras)...")
-        try:
-            generate_report(repo, run_id, unit, report_output_path)
-        except Exception:
-            # Achado real (auditoria de resiliência): esta chamada estava
-            # fora de qualquer try/except -- uma falha de ESCRITA aqui
-            # (disco cheio, permissão, etc.) abortava a execução inteira
-            # ANTES da Fase 2 (IA) sequer começar, mesmo com a Fase 1 já
-            # 100% concluída e persistida no banco.
-            logger.exception("Falha ao gerar relatório (fase de regras) -- Fase 2 (IA) segue mesmo assim")
-
-        # LLM-004 / DEC-090 (achado confirmado pela auditoria de
-        # resiliência): o sinal de "nota nova" é consumido e destruído em
-        # `_process_patient_rules` (hash de `repo.add_note`) antes da Fase 2
-        # sequer existir -- um paciente cuja análise falhou (ou cuja vez
-        # nunca chegou numa Fase 2 interrompida em execução anterior) NUNCA
-        # mais entra sozinho em `llm_tasks` só por causa disso; só uma
-        # evolução genuinamente nova o resgataria, o que pode levar dias ou
-        # nunca acontecer. Recoloca esses pacientes na fila TODA execução,
-        # usando o HISTÓRICO COMPLETO já extraído (não uma nota isolada) já
-        # que nunca tiveram nenhuma análise bem-sucedida pra incorporar.
-        already_queued = {task[0] for task in llm_tasks}
-        for pending_patient_id in repo.get_active_patients_pending_ai_analysis():
-            if pending_patient_id in already_queued:
-                continue
-            backlog_notes = _reconstruct_all_notes(repo, pending_patient_id)
-            if not backlog_notes:
-                continue
-            windowed, window_limited = _prepare_notes_for_llm(backlog_notes, LLM_LOOKBACK_DAYS)
-            llm_tasks.append((pending_patient_id, windowed, window_limited))
-
-        # DEC-085: pedido do usuário (E2E-001, achado real -- pacientes de
-        # longa permanência acumulam mais evolução e derrubam o LLM em
-        # timeouts de até 30min cada, DEC-070/071) -- processar primeiro
-        # quem tem MENOS texto pro LLM (`llm_notes`, já recortado pela
-        # janela de 2 semanas do DEC-066), do menor pro maior. Como o
-        # relatório é regravado a cada paciente da Fase 2 (ver abaixo), isso
-        # agrega resultado útil no relatório mais cedo -- e se a execução
-        # for interrompida ou demorar demais, quem fica de fora são
-        # justamente os casos de maior volume de evolução (internação
-        # longa), que o usuário confirmou não serem prioridade de inspeção.
-        # Não é medição real de tempo (impossível sem rodar) -- é o mesmo
-        # proxy que as investigações reais do DEC-065/070 já mostraram
-        # correlacionar com demora (mais texto -> resposta mais longa ->
-        # mais tempo de geração no hardware lento confirmado).
-        llm_tasks.sort(key=lambda task: sum(len(note.text) for note in task[1]))
-
-        # DEC-071: o relatório com regras já fica disponível ANTES da
-        # análise por IA começar -- quem clicou "Atualizar agora" não
-        # precisa esperar o LLM pra ter algo útil na tela. O mesmo relatório
-        # é regenerado a cada paciente conforme a análise por IA vai ficando
-        # pronta (pode demorar bastante nesta máquina -- DEC-070), sem
-        # exigir um segundo clique.
-        if llm is not None and llm_tasks:
-            total_llm = len(llm_tasks)
-            report(
-                f"Relatório disponível. Iniciando análise por IA para {total_llm} "
-                f"paciente(s) (pode demorar bastante nesta máquina)..."
+        # DEC-109: até aqui (DEC-071), coleta+regras (rápido, mas depende do
+        # GSUS responder) e análise por IA (lento, CPU/GPU local -- DEC-070)
+        # rodavam em duas fases estritamente sequenciais -- a IA só começava
+        # depois que TODO paciente já tivesse passado pela Fase 1, deixando a
+        # IA ociosa o tempo todo em que a Fase 1 esperava o GSUS. Achado real
+        # 2026-09-02: numa execução de 182 pacientes isso significava só 16
+        # entrando na Fase 2 depois de mais de 1h de Fase 1. Agora a Fase 2
+        # roda numa thread dedicada (`_llm_phase2_worker`), consumindo uma
+        # fila conforme a Fase 1 vai liberando cada paciente -- as duas fases
+        # se sobrepõem de verdade, sem exigir que a IA espere o lote inteiro.
+        # `queued_patient_ids` substitui a antiga lista `llm_tasks`
+        # (guardava tupla completa) só pra saber quem já foi enfileirado
+        # nesta run, usado no passo de "backlog" logo depois do laço.
+        llm_queue: queue.Queue = queue.Queue()
+        queued_patient_ids: set[str] = set()
+        llm_worker_thread: threading.Thread | None = None
+        # DEC-109 (revisão adversarial, 2026-09-02): `worker_failed` é o único
+        # jeito de `run_once` saber que a thread da Fase 2 morreu de um jeito
+        # inesperado (não pelo caminho normal do disjuntor de saúde, que já
+        # tem seu próprio `report()`) -- sem isto, achado real da revisão: um
+        # erro na conexão/loop da thread desaparecia num traceback de stderr
+        # que o `logging` configurado (`app/main.py`) nunca via, e a run
+        # inteira era reportada como concluída com sucesso mesmo com a Fase 2
+        # inteira pulada em silêncio.
+        worker_failed = threading.Event()
+        # `backlog_tasks` precisa existir ANTES do `try` abaixo -- se algo
+        # explodir cedo (ex.: no laço da Fase 1) o `finally` ainda referencia
+        # esta variável pra decidir o que enfileirar antes de encerrar a
+        # thread.
+        backlog_tasks: list[tuple[str, list[StructuredNote], bool]] = []
+        if llm is not None:
+            llm_worker_thread = threading.Thread(
+                target=_llm_phase2_worker,
+                args=(_get_db_path(repo), run_id, unit, report_output_path, llm, llm_queue, report, worker_failed),
+                name="llm-phase2-worker",
+                daemon=True,
             )
-            consecutive_unhealthy = 0
-            for i, (patient_id, llm_notes, window_limited) in enumerate(llm_tasks, start=1):
-                # Achado real (auditoria de resiliência + DEC-087): um
-                # `llama-server` com slot preso responde `/health`
-                # normalmente -- sem este disjuntor, cada paciente restante
-                # queimaria seu timeout inteiro (até 90min) contra um
-                # servidor visivelmente morto. `hasattr` mantém isto opcional
-                # pra qualquer `AnalysisEngine` de teste que não implemente
-                # `is_healthy` (protocolo por duck typing).
-                # Mesmo achado do RESIL-011 (ver Fase 1 acima) aplicado aqui:
-                # a checagem de saúde do llama-server e o `report()` de
-                # progresso rodavam fora do try/except por paciente -- uma
-                # exceção nesta bookkeeping (não uma falha de análise em si)
-                # abortava a Fase 2 inteira de uma vez. Isolado: uma falha
-                # aqui pula ESTE paciente (soma no disjuntor de saúde, já que
-                # não dá pra distinguir "servidor realmente instável" de
-                # "erro ao checar" com segurança) e segue pros demais.
+            llm_worker_thread.start()
+        # DEC-109 (revisão adversarial, 2026-09-02): TUDO daqui até o
+        # `finally` precisa ficar dentro deste `try` -- achado real e
+        # reproduzido pela revisão: antes desta correção, uma exceção em
+        # QUALQUER ponto entre o início da thread da Fase 2 e o envio do
+        # sentinela (`finish_run`, o laço de backlog abaixo, etc.) pulava
+        # direto pro `except` mais externo (mais abaixo) sem nunca enfileirar
+        # `_LLM_QUEUE_DONE` nem chamar `.join()` -- a thread ficava PRA
+        # SEMPRE bloqueada em `llm_queue.get()`, vazando ela e a conexão
+        # SQLite dela pelo resto da vida do processo (grave de verdade no
+        # botão "Atualizar agora" da UI, processo de vida longa -- clique
+        # seguinte inicia mais uma thread zumbi, cada vez mais conexões
+        # concorrentes escrevendo no mesmo banco). O `finally` garante o
+        # sentinela+join sempre rodar, não importa por onde a função saia.
+        try:
+            while True:
+                # Achado real (auditoria de certificação pré-entrega, 2026-09-01,
+                # RESIL-011/DEC-105): confirmado no banco de PRODUÇÃO real -- várias runs
+                # tinham dezenas/centenas de pacientes presos em PENDING sem
+                # NENHUM `ERROR` correspondente, porque `repo.next_pending`
+                # (dequeue) rodava fora de qualquer try/except: uma falha de
+                # escrita SQLite aqui (lock momentâneo, disco lento) abortava a
+                # run inteira de uma vez, não isolava por paciente (RF-12). Se
+                # o PRÓPRIO dequeue falhar, não há como saber quem seria o
+                # próximo paciente pra marcar erro -- para o loop com segurança
+                # (os pacientes ainda PENDING são retomados no próximo censo,
+                # não ficam perdidos, só adiados).
                 try:
-                    if hasattr(llm, "is_healthy") and not llm.is_healthy():
-                        consecutive_unhealthy += 1
-                        logger.error(
-                            "llama-server não respondeu à checagem de saúde (paciente %d de %d)", i, total_llm,
-                        )
-                        if consecutive_unhealthy >= MAX_CONSECUTIVE_UNHEALTHY_CHECKS:
-                            remaining = total_llm - i + 1
-                            report(
-                                f"Interrompendo análise por IA: llama-server não está respondendo -- "
-                                f"{remaining} paciente(s) ficarão sem análise nesta execução."
-                            )
-                            logger.error(
-                                "Fase 2 interrompida por disjuntor de saúde -- %d paciente(s) sem análise", remaining,
-                            )
-                            break
-                        continue
-                    consecutive_unhealthy = 0
-                    report(f"Analisando paciente {i} de {total_llm} com IA...")
+                    patient_id = repo.next_pending(run_id)
                 except Exception:
-                    consecutive_unhealthy += 1
+                    logger.exception("Falha ao buscar próximo paciente da fila -- interrompendo Fase 1 desta run")
+                    break
+                if patient_id is None:
+                    break
+                processed += 1
+                # Mesma classe de achado: `report()`/`mark_processing()` também
+                # rodavam fora do try/except por paciente logo abaixo -- uma
+                # falha aqui (callback de progresso quebrado, escrita SQLite)
+                # tinha o mesmo efeito de abortar todo mundo de uma vez. Isolado
+                # agora: falha aqui marca ESTE paciente como erro e segue pro
+                # próximo, em vez de abortar a fila inteira.
+                try:
+                    report(f"Processando paciente {processed} de {total} (regras)...")
+                    repo.mark_processing(run_id, patient_id)
+                except Exception as exc:
                     logger.exception(
-                        "Falha ao checar saúde do llama-server/reportar progresso (paciente %d de %d)", i, total_llm,
+                        "Falha ao registrar início do processamento do paciente %s", pseudonym.for_log(patient_id),
                     )
-                    if consecutive_unhealthy >= MAX_CONSECUTIVE_UNHEALTHY_CHECKS:
-                        logger.error("Fase 2 interrompida -- falhas repetidas na bookkeeping, não na análise em si")
-                        break
+                    try:
+                        repo.mark_error(run_id, patient_id, _safe_error_text(exc))
+                    except Exception:
+                        logger.exception(
+                            "Falha também ao marcar erro do paciente %s -- pulando", pseudonym.for_log(patient_id),
+                        )
                     continue
                 try:
-                    _run_llm_analysis(repo, patient_id, llm, llm_notes, window_limited=window_limited)
-                except Exception:  # isolamento de falha por paciente -- RF-12
-                    logger.exception(
-                        "Falha inesperada na análise por IA do paciente %s -- seguindo pros demais",
-                        pseudonym.for_log(patient_id),
+                    llm_input = _process_patient_rules(repo, patients_by_id[patient_id], patient_id, record_source)
+                    repo.mark_done(run_id, patient_id)
+                    if llm is not None and llm_input is not None:
+                        llm_notes, window_limited = llm_input
+                        queued_patient_ids.add(patient_id)
+                        llm_queue.put((patient_id, llm_notes, window_limited))
+                except GSUSNoCurrentAdmissionDays:
+                    # Não é falha técnica -- paciente sem internação atual na
+                    # tela (provável alta recente, ainda no censo/fila do dia).
+                    # Categoria separada no relatório, decisão do usuário -- ver
+                    # DEC-054.
+                    repo.mark_no_admission(run_id, patient_id)
+                except Exception as exc:  # isolamento de falha por paciente -- RF-12
+                    logger.exception("Falha ao processar paciente %s", pseudonym.for_log(patient_id))
+                    repo.mark_error(run_id, patient_id, _safe_error_text(exc))
+
+            try:
+                repo.finish_run(run_id, "COMPLETED")
+            except Exception:
+                # DEC-109 (revisão adversarial): achado real -- esta chamada
+                # ficava sem proteção, diferente de tudo ao redor. Antes da
+                # Fase 2 rodar em paralelo, não havia OUTRO escritor tocando o
+                # banco neste instante; agora a thread da Fase 2 pode estar
+                # gravando análise ao mesmo tempo, e o timeout padrão do
+                # sqlite3 (5s) podia estourar sob contenção momentânea --
+                # abortando uma run cuja Fase 1 inteira já persistiu com
+                # sucesso, só por causa de uma trava passageira nesta última
+                # gravação de status.
+                logger.exception(
+                    "Falha ao marcar run como COMPLETED -- Fase 1 já persistiu tudo, seguindo mesmo assim"
+                )
+            report("Gerando relatório (regras)...")
+            try:
+                generate_report(repo, run_id, unit, report_output_path)
+            except Exception:
+                # Achado real (auditoria de resiliência): esta chamada estava
+                # fora de qualquer try/except -- uma falha de ESCRITA aqui
+                # (disco cheio, permissão, etc.) abortava a execução inteira
+                # ANTES da Fase 2 (IA) sequer começar, mesmo com a Fase 1 já
+                # 100% concluída e persistida no banco.
+                logger.exception("Falha ao gerar relatório (fase de regras) -- Fase 2 (IA) segue mesmo assim")
+
+            # LLM-004 / DEC-090 (achado confirmado pela auditoria de
+            # resiliência): o sinal de "nota nova" é consumido e destruído em
+            # `_process_patient_rules` (hash de `repo.add_note`) antes da Fase 2
+            # sequer existir -- um paciente cuja análise falhou (ou cuja vez
+            # nunca chegou numa Fase 2 interrompida em execução anterior) NUNCA
+            # mais entra sozinho na fila só por causa disso; só uma evolução
+            # genuinamente nova o resgataria, o que pode levar dias ou nunca
+            # acontecer. Recoloca esses pacientes na fila TODA execução, usando
+            # o HISTÓRICO COMPLETO já extraído (não uma nota isolada) já que
+            # nunca tiveram nenhuma análise bem-sucedida pra incorporar.
+            #
+            # DEC-109: diferente dos pacientes "frescos" (enfileirados durante a
+            # Fase 1, acima, na ordem em que cada um termina -- já consumidos ou
+            # em consumo pela thread da Fase 2 a esta altura), o backlog só pode
+            # ser calculado DEPOIS que a Fase 1 termina (`already_queued` precisa
+            # do conjunto final). Continua ordenado do menor pro maior volume de
+            # nota (DEC-085) -- preserva a intenção original pra esta fatia da
+            # fila, mesmo que os itens frescos não sigam mais essa ordem.
+            #
+            # Acréscimo deliberadamente SEM try/except (revisão adversarial,
+            # DEC-109): uma falha aqui continua propagando pro `except` mais
+            # externo, marcando a run FAILED -- contrato já testado
+            # (`test_pipeline_marks_run_as_failed_instead_of_stuck_running_on_uncaught_error`)
+            # e mantido de propósito. O que muda é só o `finally` logo
+            # abaixo: ele SEMPRE roda antes da exceção continuar subindo,
+            # então o sentinela/join da thread da Fase 2 nunca deixam de
+            # acontecer só porque o backlog explodiu.
+            for pending_patient_id in repo.get_active_patients_pending_ai_analysis():
+                if pending_patient_id in queued_patient_ids:
+                    continue
+                backlog_notes = _reconstruct_all_notes(repo, pending_patient_id)
+                if not backlog_notes:
+                    continue
+                windowed, window_limited = _prepare_notes_for_llm(backlog_notes, LLM_LOOKBACK_DAYS)
+                backlog_tasks.append((pending_patient_id, windowed, window_limited))
+            backlog_tasks.sort(key=lambda task: sum(len(note.text) for note in task[1]))
+        finally:
+            if llm_worker_thread is not None:
+                for task in backlog_tasks:
+                    llm_queue.put(task)
+                llm_queue.put(_LLM_QUEUE_DONE)
+                report("Aguardando a análise por IA (já em andamento em paralelo desde a Fase 1) terminar a fila...")
+                # DEC-109 (revisão adversarial): `.join()` sem timeout algum
+                # já existia em espírito antes (Fase 2 sequencial tinha o
+                # mesmo teto de ~90min/paciente sem disjuntor eficaz contra um
+                # slot travado que ainda responde `/health`) -- não é
+                # regressão nova, mas agora que a Fase 2 é uma unidade isolada
+                # e esperável, dá pra pelo menos logar sinal de vida periódico
+                # em vez de bloquear em silêncio indefinidamente.
+                while llm_worker_thread.is_alive():
+                    llm_worker_thread.join(timeout=300)
+                    if llm_worker_thread.is_alive():
+                        logger.info(
+                            "Fase 2 (análise por IA) ainda em andamento em segundo plano (%d na fila)...",
+                            llm_queue.qsize(),
+                        )
+                if worker_failed.is_set():
+                    report(
+                        "Aviso: a análise por IA foi interrompida por um erro inesperado -- "
+                        "pacientes pendentes serão retomados na próxima execução."
                     )
-                try:
-                    generate_report(repo, run_id, unit, report_output_path)
-                except Exception:
-                    # Achado real (auditoria de resiliência): esta chamada
-                    # roda DEZENAS de vezes por execução (uma por paciente) e
-                    # estava fora de qualquer try/except -- uma única falha
-                    # de escrita no meio abortava TODA a análise de IA
-                    # restante, mesmo que o `llama-server` estivesse saudável.
-                    logger.exception(
-                        "Falha ao regravar relatório após paciente %s -- análise por IA segue mesmo assim",
-                        pseudonym.for_log(patient_id),
-                    )
-            report("Análise por IA concluída.")
+                else:
+                    report("Análise por IA concluída.")
 
         # REPORT-003 Fase 2 / DEC-099: retrato agregado do serviço, gravado
         # depois que a Fase 2 (IA) já terminou pra esta run -- é o estado
@@ -380,6 +394,138 @@ def run_once(
             except Exception:
                 logger.exception("Falha ao marcar run como FAILED após erro")
         raise
+
+
+def _get_db_path(repo: Repository) -> Path:
+    """Caminho do arquivo do banco por trás de `repo.conn` -- usado só pra
+    `_llm_phase2_worker` (DEC-109) abrir sua PRÓPRIA conexão (nunca
+    compartilha `sqlite3.Connection` entre threads). Funciona igual em
+    produção (arquivo real) e em teste (`tmp_path` do pytest) porque ambos
+    usam um arquivo de verdade -- nunca `:memory:` (ver `database.init_db`)."""
+    row = repo.conn.execute("PRAGMA database_list").fetchone()
+    return Path(row["file"])
+
+
+_LLM_QUEUE_DONE = object()
+
+
+def _llm_phase2_worker(
+    db_path: Path,
+    run_id: str,
+    unit: str,
+    report_output_path: Path,
+    llm: AnalysisEngine,
+    llm_queue: "queue.Queue",
+    report: ProgressCallback,
+    worker_failed: threading.Event,
+) -> None:
+    """Consome `llm_queue` numa thread dedicada, em paralelo com a Fase 1
+    (DEC-109) -- achado real 2026-09-02: numa execução de 182 pacientes, o
+    desenho antigo (Fase 2 só começa depois que TODA a Fase 1 termina) fazia
+    a IA (CPU/GPU local) ficar ociosa por mais de 1h enquanto a Fase 1
+    esperava respostas lentas do GSUS, processando só 16 pacientes na Fase 2
+    apesar de já ter mais de 100 prontos. Pedido explícito do usuário pra
+    acelerar sem trocar hardware.
+
+    Abre sua PRÓPRIA conexão SQLite -- nunca compartilha `sqlite3.Connection`
+    entre threads (regra do módulo, ver `app/storage/repository.py`). Seguro
+    porque o banco já roda em WAL (`database.get_connection`), que suporta
+    um escritor + múltiplas conexões concorrentes sem exigir coordenação
+    extra em código Python -- e `generate_report` já escreve com nome de
+    arquivo temporário por thread (`html_report.py`), então as duas fases
+    regravando o relatório ao mesmo tempo não colidem.
+
+    Thread `daemon=True` (ver `run_once`): se a execução abortar por exceção
+    não tratada antes do dreno normal da fila, o processo ainda consegue
+    encerrar -- pior caso é perder a análise do paciente que estava em
+    andamento naquele exato momento, que uma execução futura refaz sozinha
+    (nada aqui é marcado concluído até `_run_llm_analysis` de fato terminar).
+
+    Preço consciente desta mudança: quem chega FRESCO durante a Fase 1 é
+    consumido na ordem em que a Fase 1 termina cada paciente, não mais do
+    menor pro maior volume de nota (DEC-085) -- só o backlog (enfileirado
+    depois que a Fase 1 termina, ver `run_once`) continua ordenado assim.
+
+    `worker_failed` (revisão adversarial, DEC-109): setado só nos dois
+    caminhos de erro genuinamente inesperado abaixo (nunca no disjuntor de
+    saúde, que já se comunica via `report()` normalmente) -- é como
+    `run_once` sabe, depois do `.join()`, que a Fase 2 morreu de verdade em
+    vez de terminar normalmente, sem precisar inspecionar log."""
+    # DEC-109 (revisão adversarial): achado real -- abrir a conexão ficava
+    # FORA do try/except logo abaixo. Se `database.init_db` falhasse aqui
+    # (concorrência com a Fase 1 escrevendo no mesmo arquivo, disco lento),
+    # a exceção escapava da thread inteira sem passar pelo `logger` desta
+    # aplicação -- vira só um traceback no stderr que ninguém vê numa
+    # execução automática sem console (`--auto-update`), e a Fase 2 inteira
+    # era pulada em silêncio enquanto `run_once` seguia reportando sucesso.
+    try:
+        worker_conn = database.init_db(db_path)
+    except Exception:
+        logger.exception(
+            "Falha ao abrir conexão da thread de análise por IA -- Fase 2 não vai rodar nesta execução"
+        )
+        worker_failed.set()
+        return
+    worker_repo = Repository(worker_conn)
+    consecutive_unhealthy = 0
+    try:
+        while True:
+            item = llm_queue.get()
+            if item is _LLM_QUEUE_DONE:
+                return
+            patient_id, llm_notes, window_limited = item
+            # Mesmo disjuntor de saúde do llama-server já existente (achado
+            # real, auditoria de resiliência + DEC-087) e o mesmo isolamento
+            # de falha de bookkeeping (RESIL-011) -- só adaptados de "índice
+            # numa lista pronta" pra "item consumido de uma fila viva".
+            try:
+                if hasattr(llm, "is_healthy") and not llm.is_healthy():
+                    consecutive_unhealthy += 1
+                    logger.error(
+                        "llama-server não respondeu à checagem de saúde (%d na fila no momento)",
+                        llm_queue.qsize(),
+                    )
+                    if consecutive_unhealthy >= MAX_CONSECUTIVE_UNHEALTHY_CHECKS:
+                        report(
+                            "Interrompendo análise por IA: llama-server não está respondendo -- "
+                            "pacientes restantes na fila ficarão sem análise nesta execução."
+                        )
+                        logger.error("Fase 2 interrompida por disjuntor de saúde")
+                        return
+                    continue
+                consecutive_unhealthy = 0
+                report(f"Analisando paciente com IA ({llm_queue.qsize()} restante(s) na fila no momento)...")
+            except Exception:
+                consecutive_unhealthy += 1
+                logger.exception("Falha ao checar saúde do llama-server/reportar progresso")
+                if consecutive_unhealthy >= MAX_CONSECUTIVE_UNHEALTHY_CHECKS:
+                    logger.error("Fase 2 interrompida -- falhas repetidas na bookkeeping, não na análise em si")
+                    return
+                continue
+            try:
+                _run_llm_analysis(worker_repo, patient_id, llm, llm_notes, window_limited=window_limited)
+            except Exception:  # isolamento de falha por paciente -- RF-12
+                logger.exception(
+                    "Falha inesperada na análise por IA do paciente %s -- seguindo pros demais",
+                    pseudonym.for_log(patient_id),
+                )
+            try:
+                generate_report(worker_repo, run_id, unit, report_output_path)
+            except Exception:
+                logger.exception(
+                    "Falha ao regravar relatório após paciente %s -- análise por IA segue mesmo assim",
+                    pseudonym.for_log(patient_id),
+                )
+    except Exception:
+        # Nunca deixa a thread morrer em silêncio (comportamento padrão do
+        # Python pra exceção não tratada numa thread -- só imprime no
+        # stderr, ninguém no thread principal fica sabendo). Acontecendo
+        # isto, a Fase 2 desta execução simplesmente para de avançar --
+        # seguro (nada fica marcado concluído até de fato terminar).
+        logger.exception("Thread de análise por IA (Fase 2) encerrada por erro inesperado")
+        worker_failed.set()
+    finally:
+        worker_conn.close()
 
 
 def _process_patient_rules(
