@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Protocol
 
+from app.analysis import run_diagnosis
 from app.analysis.llm import LLMAnalysisError
 from app.analysis.priority import compute_priority, hours_elapsed_since
 from app.analysis.rules import StructuredNote, apply_all_rules, most_recent_note
@@ -384,15 +385,48 @@ def run_once(
         except Exception:
             logger.exception("Falha ao gravar snapshot diário -- execução segue concluída mesmo assim")
 
+        # DIAG-001 (2026-09-03, pedido do usuário): registra, em linguagem
+        # simples, o que aconteceu nesta execução -- pra que o auditor (sem
+        # conhecimento técnico) saiba se uma falha foi o GSUS/rede (não é
+        # defeito deste programa) ou algo que precisa de suporte de
+        # verdade, sem precisar abrir o log. Isolado em try/except pelo
+        # mesmo motivo do snapshot acima -- registrar o diagnóstico nunca
+        # pode derrubar uma execução que já terminou de verdade.
+        try:
+            final_counts = repo.get_run_counts(run_id)
+            outcome, summary, needs_attention = run_diagnosis.classify_completed_run(
+                found=final_counts["found"],
+                completed=final_counts["completed"],
+                no_admission=final_counts["no_admission"],
+                patient_errors=repo.get_error_messages_for_run(run_id),
+                census_complete=census_complete,
+            )
+            repo.save_run_diagnostic(run_id, outcome, summary, needs_attention)
+        except Exception:
+            logger.exception("Falha ao registrar diagnóstico da execução -- execução segue concluída mesmo assim")
+
         report("Concluído.")
         return RunResult(run_id=run_id, counts=repo.get_run_counts(run_id), report_path=report_output_path)
-    except Exception:
+    except Exception as exc:
         logger.exception("Execução abortada por erro não tratado")
         if run_id is not None:
             try:
                 repo.finish_run(run_id, "FAILED")
             except Exception:
                 logger.exception("Falha ao marcar run como FAILED após erro")
+        # DIAG-001: mesma ideia do caminho de sucesso acima, mas pro caminho
+        # de falha -- inclusive quando `run_id` nunca chegou a existir
+        # (login ou censo falharam por completo). Esse é justamente o
+        # cenário que, antes desta correção, não deixava NENHUM rastro no
+        # banco (achado da auditoria de catálogo de falhas, DEC-111) --
+        # `exc` marcado depois pra `update_flow.py` não duplicar o registro
+        # se a mesma exceção também passar por lá.
+        try:
+            outcome, summary = run_diagnosis.classify_top_level_exception(exc)
+            repo.save_run_diagnostic(run_id, outcome, summary, needs_attention=True)
+            exc._gsus_diagnostic_written = True
+        except Exception:
+            logger.exception("Falha ao registrar diagnóstico da execução com erro")
         raise
 
 

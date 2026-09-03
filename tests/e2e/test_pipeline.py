@@ -14,8 +14,9 @@ from pathlib import Path
 
 import pytest
 
+from app.analysis import run_diagnosis
 from app.analysis.llm import LLMAnalysisError
-from app.gsus.census import GSUSCensusIncompleteError
+from app.gsus.census import GSUSCensusError, GSUSCensusIncompleteError
 from app.gsus.records import GSUSNoCurrentAdmissionDays
 from app.models import Patient
 from app.orchestrator import run_once
@@ -48,6 +49,16 @@ class PartialCensusSource:
         raise GSUSCensusIncompleteError(
             "simulado: paginação instável", self._visible_patients
         )
+
+
+class TotalCensusFailureSource:
+    """DIAG-001: simula o censo falhando por completo (nem uma página --
+    achado real de auditoria de catálogo, DEC-111: este é um dos caminhos
+    que, antes do diagnóstico, não deixava NENHUM rastro no banco, já que
+    `run_id` nunca chega a ser criado)."""
+
+    def get_census(self) -> list[Patient]:
+        raise GSUSCensusError("simulado: tela de censo não abriu de jeito nenhum")
 
 
 class FixtureRecordSource:
@@ -693,4 +704,86 @@ def test_pipeline_does_not_purge_when_retention_not_configured(tmp_path):
     run_once(repo, FixtureCensusSource([]), records, UNIT, report_path, llm=None)  # sem raw_notes_retention_days
 
     assert len(repo.get_notes("100")) == 2
+    conn.close()
+
+
+# --------------------------------------------------------------- DIAG-001
+# Achado de auditoria de catálogo de falhas (2026-09-03, DEC-111): antes
+# desta correção, várias falhas (censo total, login) não deixavam NENHUM
+# rastro persistente -- só no log técnico que o auditor (sem conhecimento
+# técnico, PROJECT_SPEC.md seção 2) nunca abre. Estes testes confirmam que
+# `run_once` agora sempre registra um diagnóstico em linguagem simples,
+# nos três formatos de desfecho possíveis.
+
+def test_clean_run_writes_success_diagnostic(tmp_path):
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    census = FixtureCensusSource([Patient(record_number="100", bed="2A", unit=UNIT)])
+    records = FixtureRecordSource({"100": "awaiting_exam.txt"})
+    report_path = tmp_path / "relatorio.html"
+
+    run_once(repo, census, records, UNIT, report_path, llm=StubLLM())
+
+    diagnostic = repo.get_latest_run_diagnostic()
+    assert diagnostic is not None
+    assert diagnostic["run_id"] is not None
+    assert diagnostic["outcome"] == run_diagnosis.OUTCOME_SUCESSO
+    assert not diagnostic["needs_attention"]
+    conn.close()
+
+
+def test_incomplete_census_writes_partial_gsus_diagnostic_tied_to_the_run(tmp_path):
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    census = PartialCensusSource([Patient(record_number="100", bed="2A", unit=UNIT)])
+    records = FixtureRecordSource({"100": "awaiting_exam.txt"})
+    report_path = tmp_path / "relatorio.html"
+
+    run_once(repo, census, records, UNIT, report_path, llm=StubLLM())
+
+    diagnostic = repo.get_latest_run_diagnostic()
+    assert diagnostic is not None
+    assert diagnostic["run_id"] is not None  # censo parcial ainda processa quem foi coletado -- run existe
+    assert diagnostic["outcome"] == run_diagnosis.OUTCOME_SUCESSO_PARCIAL_GSUS
+    assert "GSUS" in diagnostic["summary"]
+    conn.close()
+
+
+def test_total_census_failure_writes_diagnostic_with_no_run_id(tmp_path):
+    """O cenário exato que era invisível antes desta correção -- censo
+    falha por completo, `run_id` nunca chega a existir, mas o auditor
+    precisa saber que a execução de hoje simplesmente não rodou, e por quê."""
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    records = FixtureRecordSource({})
+    report_path = tmp_path / "relatorio.html"
+
+    with pytest.raises(GSUSCensusError):
+        run_once(repo, TotalCensusFailureSource(), records, UNIT, report_path, llm=StubLLM())
+
+    diagnostic = repo.get_latest_run_diagnostic()
+    assert diagnostic is not None
+    assert diagnostic["run_id"] is None  # achado central: run_id nunca existiu, mas o diagnóstico existe mesmo assim
+    assert diagnostic["outcome"] == run_diagnosis.OUTCOME_FALHA_GSUS
+    assert diagnostic["needs_attention"]
+    conn.close()
+
+
+def test_unexpected_per_patient_error_type_flags_diagnostic_for_investigation(tmp_path):
+    """Um tipo de erro que o classificador não reconhece como causa
+    conhecida do GSUS precisa aparecer como FALHA_INESPERADA, mesmo que a
+    run em si tenha terminado 'normalmente' (RF-12, falha isolada por
+    paciente) -- é assim que um bug real de verdade não fica escondido."""
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    census = FixtureCensusSource([Patient(record_number="999", bed="2A", unit=UNIT)])
+    records = FailingRecordSource({})  # paciente "999" sempre levanta TimeoutError genérico
+    report_path = tmp_path / "relatorio.html"
+
+    run_once(repo, census, records, UNIT, report_path, llm=StubLLM())
+
+    diagnostic = repo.get_latest_run_diagnostic()
+    assert diagnostic is not None
+    assert diagnostic["outcome"] == run_diagnosis.OUTCOME_FALHA_INESPERADA
+    assert diagnostic["needs_attention"]
     conn.close()

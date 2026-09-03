@@ -104,6 +104,7 @@ def _run_update_locked(
     já garantido pelo chamador."""
     # Imports tardios: evitam custo de import do Playwright/orchestrator
     # quando a tela abre e ainda não interagiu com "Atualizar agora".
+    from app.analysis import run_diagnosis
     from app.analysis.llm import LLMStartupError, LocalLLM
     from app.analysis.model_downloader import ModelDownloadError, ensure_model_downloaded
     from app.gsus.adapter import GSUSAdapter
@@ -117,13 +118,24 @@ def _run_update_locked(
         if progress is not None:
             progress(message)
 
-    cred = credentials.get_credential("gsus")
-    if cred is None:
-        raise RuntimeError("Credencial GSUS não configurada.")
-    username, password = cred
-
+    # DIAG-001 (2026-09-03): `repo` precisa existir ANTES da checagem de
+    # credencial pra conseguir registrar um diagnóstico mesmo nesse caso --
+    # achado da auditoria de catálogo de falhas (DEC-111): esse é um dos
+    # poucos caminhos que roda ANTES de `run_once` sequer começar (login
+    # falho/censo falho por completo já ficam cobertos DENTRO de
+    # `run_once`, ver orchestrator.py).
     conn = database.init_db(config.get_db_path())
     repo = Repository(conn)
+
+    cred = credentials.get_credential("gsus")
+    if cred is None:
+        exc = RuntimeError("Credencial GSUS não configurada.")
+        outcome, summary = run_diagnosis.classify_top_level_exception(exc)
+        repo.save_run_diagnostic(None, outcome, summary, needs_attention=True)
+        exc._gsus_diagnostic_written = True
+        conn.close()
+        raise exc
+    username, password = cred
 
     # Inicia o LLM ANTES do GSUS -- carregar o modelo pode levar minutos
     # nesta máquina (hardware fraco, ver CURRENT_STATE.md); abrir a sessão
@@ -179,6 +191,21 @@ def _run_update_locked(
                 progress=report,
                 raw_notes_retention_days=app_config.raw_notes_retention_days,
             )
+    except Exception as exc:
+        # DIAG-001: cobre os poucos caminhos que ainda rodam FORA de
+        # `run_once` (abertura do navegador/`client.goto()`, achado da
+        # auditoria de catálogo de falhas DEC-111) -- `run_once` já
+        # registra o diagnóstico sozinho pra tudo que acontece dentro dele
+        # (login/censo inclusos, ver adapter.py::_ensure_login) e marca a
+        # exceção com `_gsus_diagnostic_written` pra este bloco não
+        # duplicar o registro.
+        if not getattr(exc, "_gsus_diagnostic_written", False):
+            try:
+                outcome, summary = run_diagnosis.classify_top_level_exception(exc)
+                repo.save_run_diagnostic(None, outcome, summary, needs_attention=True)
+            except Exception:
+                logger.exception("Falha ao registrar diagnóstico da execução com erro (fora de run_once)")
+        raise
     finally:
         if llm is not None:
             llm.stop()

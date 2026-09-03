@@ -28,7 +28,10 @@ from tkinter import messagebox, ttk
 import tkinter as tk
 from typing import Callable
 
+from datetime import datetime, timezone
+
 from app import config
+from app.analysis import run_diagnosis
 from app.reports import dashboard_metrics
 from app.reports.dashboard_metrics import PatientCensusRow
 from app.reports.html_report import PatientLookupResult, generate_patient_report
@@ -64,6 +67,22 @@ FONT_FAMILY = "Segoe UI"
 # imediata do auditor (EDD vencida, dia vermelho hoje), verde pro indicador
 # positivo (dia verde). Nunca reinterpreta severidade clínica além do que já
 # está em PRIORITY_COLORS -- só reaproveita a mesma linguagem.
+# DIAG-001 (2026-09-03): cor de fundo do aviso de diagnóstico por
+# resultado -- mesma lógica de "vermelho só quando precisa de atenção de
+# verdade" das outras cores desta tela. SUCESSO_PARCIAL_GSUS e FALHA_GSUS
+# usam uma cor neutra/informativa (âmbar) por padrão: o texto já deixa
+# claro que não é defeito do programa, então não deveriam alarmar como um
+# erro nosso -- só ficam vermelhos quando o próprio diagnóstico marca
+# `needs_attention` (ex.: taxa de falha alta, sugestão de conferência
+# manual). FALHA_INESPERADA é sempre vermelho.
+DIAGNOSTIC_COLORS = {
+    run_diagnosis.OUTCOME_SUCESSO: ("#eaf6ec", "#1e5e2b"),
+    run_diagnosis.OUTCOME_SUCESSO_PARCIAL_GSUS: ("#fdf3e3", "#8a5a00"),
+    run_diagnosis.OUTCOME_FALHA_GSUS: ("#fdf3e3", "#8a5a00"),
+    run_diagnosis.OUTCOME_FALHA_INESPERADA: ("#fbeae9", "#9c2b23"),
+}
+DIAGNOSTIC_ATTENTION_COLORS = ("#fbeae9", "#9c2b23")
+
 KPI_ACCENTS = {
     "total_active": BRAND_COLOR,
     "with_pending": BRAND_COLOR,
@@ -189,11 +208,12 @@ class MainWindow:
         root.resizable(True, True)
         root.configure(bg=BG_COLOR)
         root.grid_columnconfigure(0, weight=1)
-        root.grid_rowconfigure(3, weight=3)  # gráficos
-        root.grid_rowconfigure(5, weight=2)  # tabela de censo
+        root.grid_rowconfigure(4, weight=3)  # gráficos
+        root.grid_rowconfigure(6, weight=2)  # tabela de censo
 
         self._build_style()
         self._build_control_bar(root)
+        self._build_diagnostic_banner(root)
         self._build_kpi_cards(root)
         self._build_charts(root)
         self._build_unit_strip(root)
@@ -256,9 +276,52 @@ class MainWindow:
         )
         self.status_label.grid(row=1, column=0, columnspan=7, sticky="w", pady=(10, 0))
 
+    def _build_diagnostic_banner(self, root: tk.Tk) -> None:
+        """DIAG-001 (2026-09-03, pedido do usuário): mostra, em linguagem
+        simples, o resultado da última execução (sucesso, sucesso parcial
+        por instabilidade do GSUS, ou falha) e se a atualização agendada
+        parece não ter rodado -- pra que o auditor (sem conhecimento
+        técnico) nunca precise abrir o log técnico pra saber se um problema
+        foi o GSUS/a máquina (não é defeito deste programa) ou algo que
+        precisa de suporte de verdade. Uma linha só, cor muda pela
+        gravidade; escondida (`grid_remove`) quando não há nada a mostrar."""
+        self._diagnostic_banner = tk.Label(
+            root, text="", font=(FONT_FAMILY, 9, "bold"), anchor="w", justify="left",
+            wraplength=1150, padx=12, pady=8,
+        )
+        self._diagnostic_banner.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 4))
+        self._diagnostic_banner.grid_remove()
+
+    def _render_diagnostic_banner(self, repo: Repository) -> None:
+        diagnostic = repo.get_latest_run_diagnostic()
+        staleness = run_diagnosis.compute_staleness_warning(
+            diagnostic["created_at"] if diagnostic else None,
+            self.app_config.schedule_time,
+            datetime.now(timezone.utc),
+        )
+        if staleness is not None:
+            bg, fg = DIAGNOSTIC_ATTENTION_COLORS
+            self._diagnostic_banner.config(text=staleness, bg=bg, fg=fg)
+            self._diagnostic_banner.grid()
+            return
+        if diagnostic is None:
+            self._diagnostic_banner.grid_remove()
+            return
+        bg, fg = DIAGNOSTIC_COLORS.get(diagnostic["outcome"], DIAGNOSTIC_ATTENTION_COLORS)
+        if diagnostic["needs_attention"]:
+            bg, fg = DIAGNOSTIC_ATTENTION_COLORS
+        prefix = {
+            run_diagnosis.OUTCOME_SUCESSO: "Última execução: ",
+            run_diagnosis.OUTCOME_SUCESSO_PARCIAL_GSUS: "Última execução (atenção do GSUS, não do programa): ",
+            run_diagnosis.OUTCOME_FALHA_GSUS: "Última execução falhou (causa: GSUS/rede, não este programa): ",
+            run_diagnosis.OUTCOME_FALHA_INESPERADA: "Última execução -- precisa de atenção: ",
+        }.get(diagnostic["outcome"], "Última execução: ")
+        self._diagnostic_banner.config(text=prefix + diagnostic["summary"], bg=bg, fg=fg)
+        self._diagnostic_banner.grid()
+
     def _build_kpi_cards(self, root: tk.Tk) -> None:
         frame = tk.Frame(root, bg=BG_COLOR)
-        frame.grid(row=1, column=0, sticky="ew", padx=16, pady=8)
+        frame.grid(row=2, column=0, sticky="ew", padx=16, pady=8)
 
         cards = [
             ("total_active", "Pacientes ativos"),
@@ -290,7 +353,7 @@ class MainWindow:
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
         charts_frame = tk.Frame(root, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
-        charts_frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=8)
+        charts_frame.grid(row=4, column=0, sticky="nsew", padx=16, pady=8)
 
         self._fig = Figure(figsize=(11, 5), dpi=100, constrained_layout=True, facecolor=CARD_BG)
         axes = self._fig.subplots(2, 2)
@@ -321,11 +384,11 @@ class MainWindow:
             root, text="", font=(FONT_FAMILY, 9), fg=TEXT_MUTED, bg=BG_COLOR,
             justify="left", anchor="w", wraplength=1150,
         )
-        self._unit_strip.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 4))
+        self._unit_strip.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 4))
 
     def _build_census_table(self, root: tk.Tk) -> None:
         frame = tk.Frame(root, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
-        frame.grid(row=5, column=0, sticky="nsew", padx=16, pady=(0, 14))
+        frame.grid(row=6, column=0, sticky="nsew", padx=16, pady=(0, 14))
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(1, weight=1)
 
@@ -492,6 +555,7 @@ class MainWindow:
                 unit_census = dashboard_metrics.compute_unit_census(repo)
                 self._census_rows_all = dashboard_metrics.compute_patient_census_rows(repo)
                 snapshots = repo.get_daily_snapshots(limit=30)
+                self._render_diagnostic_banner(repo)
             finally:
                 conn.close()
         except Exception:

@@ -87,6 +87,49 @@ class Repository:
             "no_admission": row["no_admission"] or 0,
         }
 
+    # ------------------------------------------------------ diagnóstico (DIAG-001)
+    def save_run_diagnostic(self, run_id: str | None, outcome: str, summary: str, needs_attention: bool) -> None:
+        """Registra, em linguagem simples, o resultado de UMA tentativa de
+        execução (sucesso, sucesso parcial por instabilidade do GSUS, ou
+        falha) -- pedido explícito do usuário: o auditor (sem conhecimento
+        técnico) precisa saber se um problema foi causado pelo GSUS/rede/
+        máquina (não é defeito do programa) ou é algo que precisa de
+        suporte de verdade, sem precisar abrir o log técnico.
+
+        `run_id` fica `None` quando a execução nem chegou a criar uma run
+        (login ou censo falharam por completo, antes de `start_run()`) --
+        esse é justamente o cenário que hoje não deixava nenhum rastro no
+        banco (achado da auditoria de catálogo de falhas, DEC-111)."""
+        self.conn.execute(
+            "INSERT INTO run_diagnostics (diagnostic_id, run_id, created_at, outcome, summary, needs_attention) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), run_id, _now(), outcome, summary, 1 if needs_attention else 0),
+        )
+        self.conn.commit()
+        logger.info("Diagnóstico de execução registrado outcome=%s needs_attention=%s", outcome, needs_attention)
+
+    def get_latest_run_diagnostic(self) -> dict | None:
+        row = self.conn.execute(
+            "SELECT run_id, created_at, outcome, summary, needs_attention "
+            "FROM run_diagnostics ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "created_at": row["created_at"],
+            "outcome": row["outcome"],
+            "summary": row["summary"],
+            "needs_attention": bool(row["needs_attention"]),
+        }
+
+    def get_error_messages_for_run(self, run_id: str) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT last_error FROM processing_queue WHERE run_id = ? AND status = ?",
+            (run_id, QUEUE_ERROR),
+        ).fetchall()
+        return [row["last_error"] for row in rows if row["last_error"]]
+
     def resume_incomplete_runs(self) -> list[str]:
         """Reclassifica PROCESSING órfão de runs interrompidas como PENDING
         (ou ERROR se já esgotou tentativas). Deve ser chamado no início de

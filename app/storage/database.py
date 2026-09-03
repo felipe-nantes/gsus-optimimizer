@@ -145,12 +145,33 @@ CREATE TABLE IF NOT EXISTS daily_snapshot_category (
     total        INTEGER NOT NULL
 );
 
+-- DIAG-001 (2026-09-03): pedido explícito do usuário -- o auditor (sem
+-- conhecimento técnico, RF do produto) precisa saber, em linguagem simples,
+-- o que aconteceu numa execução que falhou, e se a causa foi o GSUS/a
+-- máquina (não é defeito do programa) ou algo que precisa de suporte de
+-- verdade. Achado de auditoria (catálogo exaustivo de falhas antes de
+-- implementar): hoje várias falhas (login, censo totalmente incompleto,
+-- falha de bookkeeping) não deixam NENHUM rastro em `runs`/
+-- `processing_queue` -- só no arquivo de log técnico que o auditor nunca
+-- abre. `run_id` fica NULL quando a execução nem chegou a criar uma run
+-- (falha de login/censo antes disso -- exatamente o caso que hoje é
+-- invisível).
+CREATE TABLE IF NOT EXISTS run_diagnostics (
+    diagnostic_id    TEXT PRIMARY KEY,
+    run_id           TEXT REFERENCES runs(run_id),
+    created_at       TEXT NOT NULL,
+    outcome          TEXT NOT NULL,
+    summary          TEXT NOT NULL,
+    needs_attention  INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_notes_patient ON notes(patient_id);
 CREATE INDEX IF NOT EXISTS idx_queue_run_status ON processing_queue(run_id, status);
 CREATE INDEX IF NOT EXISTS idx_pending_patient_status ON pending_items(patient_id, status);
 CREATE INDEX IF NOT EXISTS idx_pending_evidence_pending ON pending_item_evidence(pending_id);
 CREATE INDEX IF NOT EXISTS idx_snapshot_created ON daily_snapshot(created_at);
 CREATE INDEX IF NOT EXISTS idx_snapshot_category_snapshot ON daily_snapshot_category(snapshot_id);
+CREATE INDEX IF NOT EXISTS idx_run_diagnostics_created ON run_diagnostics(created_at);
 """
 
 VALID_QUEUE_STATUSES = {"PENDING", "PROCESSING", "DONE", "ERROR", "NO_ADMISSION"}

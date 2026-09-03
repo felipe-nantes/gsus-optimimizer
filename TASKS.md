@@ -561,6 +561,20 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  nas 3 telas.
 [ ] REPORT-002   Refinamentos visuais do relatório (CSS) -- fora de escopo desta rodada
                  (UI-005 cobriu só a tela Tkinter, não o relatório HTML)
+[x] DIAG-001     Diagnóstico de execução em linguagem simples (2026-09-03, pedido explícito
+                 do usuário) -- o auditor (sem conhecimento técnico) precisa saber se uma
+                 falha foi o GSUS/rede/máquina (não é defeito do programa) ou algo que precisa
+                 de suporte de verdade, sem abrir log técnico. Auditoria exaustiva de catálogo
+                 de falhas (4 agentes, DEC-111) ANTES de implementar -- achado central: várias
+                 falhas (login, censo total) não deixavam nenhum rastro no banco, e o nome da
+                 classe de exceção sozinho não bastava pra classificar "foi o GSUS" (algumas
+                 exceções GSUS* cobrem casos que merecem investigação de verdade). Nova tabela
+                 aditiva `run_diagnostics`, módulo puro `app/analysis/run_diagnosis.py`
+                 (classificação por padrão de mensagem curado DEC a DEC, nunca "parece que é"),
+                 aviso de "atualização agendada pode não ter rodado" (RESIL-003, máquina
+                 desligada de noite) calculado ao vivo, faixa nova na tela principal.
+                 Testes: +19 unitários (classificação pura) +4 e2e (grava certo nos 3
+                 desfechos, incluindo o cenário antes invisível). Suíte completa: 386 passed.
 [x] REPORT-003   Indicadores agregados do serviço (RF-28/RF-29, seção 12 da orientação técnica
                  de auditoria concorrente) -- PLANEJADO em detalhe 2026-09-01 (DEC-099), pedido
                  explícito do usuário pra avançar às "fases finais do projeto". Passou de "não
