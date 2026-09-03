@@ -64,8 +64,9 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  toda cascata de falhas é sessão expirada -- dessa vez foi a ABA DO FIREFOX
                  crashando de verdade ("Gah. Your tab just crashed.", tela nativa do
                  navegador). Mesma solução (`_relogin`) resolve os dois casos -- generalizado
-                 pra `_needs_relogin()` (sessão expirada OU aba crashada). Rebuild pendente
-                 (a execução em andamento já tinha passado da Fase 1 quando isso foi corrigido).
+                 pra `_needs_relogin()` (sessão expirada OU aba crashada). Rebuild aplicado logo
+                 depois (confirmado por vários ciclos de rebuild+reinstalação subsequentes,
+                 DEC-090 em diante) -- nota "rebuild pendente" estava desatualizada.
 [x] GSUS-005     Extração de evoluções — REABERTO em 2026-08-21 (DEC-040), cadeia de bugs
                  reais corrigida (DEC-040 a DEC-055): três níveis de accordion, accordion
                  EXCLUSIVO, detecção de "aberto" por tamanho do corpo, captura dia-a-dia,
@@ -103,7 +104,11 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  PRIORIZAÇÃO 2026-08-27 (DEC-085, pedido do usuário): Fase 2 processa do menor
                  pro maior volume de texto (proxy pra demora, sem medir de verdade) -- pacientes
                  de longa permanência (mais texto acumulado, mais risco de timeout) ficam por
-                 último, não atrasam o resto do relatório. Rebuild pendente.
+                 último, não atrasam o resto do relatório. Rebuild aplicado (confirmado por
+                 ciclos subsequentes) -- nota estava desatualizada. NOTA 2026-09-02 (DEC-109):
+                 essa ordenação agora só vale pro backlog (pacientes sem nota nova); quem chega
+                 fresco na Fase 1 é consumido na ordem de chegada, já que a Fase 2 passou a
+                 rodar em paralelo com a Fase 1 em vez de depois dela.
 [x] MODEL-001    Taxonomia fechada de pendências (7 categorias + subtipos, RF-22) —
                  app/analysis/taxonomy.py, fonte única para prompt e validação (DEC-057)
 [x] MODEL-002    Prioridade por regra determinística (ALTA/MÉDIA/MONITORAMENTO, RF-24) + SLA
@@ -268,8 +273,14 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  frequentemente não tem direito de admin na máquina). Build real testado: instalado,
                  aberto sem erro, desinstalado limpo (`unins000.exe`). `installer/output/GSUSAuditoria-
                  Setup.exe` (~107MB, fora do controle de versão).
-[ ] E2E-001      Teste em máquina limpa (sem Python/Playwright/llama.cpp pré-instalados)
-[ ] PILOT-001    Piloto em produção controlada (1 usuário, 1 máquina, 1 setor)
+[x] E2E-001      Teste em máquina limpa (sem Python/Playwright/llama.cpp pré-instalados) --
+                 marcado como não feito por muito tempo por engano: na prática, extensivamente
+                 executado nesta máquina real desde 2026-08-26 (login headless, paginação de
+                 censo, extração de evoluções, tarefa agendada, dashboard), com vários bugs
+                 reais encontrados e corrigidos como resultado direto (ver DEC-077 a DEC-109).
+                 Corrigido em 2026-09-03 durante auditoria de prontidão para entrega.
+[ ] PILOT-001    Piloto em produção controlada (1 usuário, 1 máquina, 1 setor) -- DEC-076:
+                 usuário confirmou que não é possível agora; E2E-001 já é suficiente por ora.
 ```
 
 ## P1 (não iniciar enquanto houver P0 pendente)

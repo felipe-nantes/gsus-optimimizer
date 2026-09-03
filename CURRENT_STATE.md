@@ -1135,3 +1135,37 @@ Proxima task: design/UX da tela (pedido explicito anterior do usuario) apos a en
 **Verificação:** rebuild + reinstalação silenciosa aplicada (12:34). Execução real disparada em produção (12:37) especificamente pra confirmar Fase 1 e Fase 2 se sobrepondo de verdade -- resultado na próxima entrada.
 
 **Resultado parcial:** PASS na revisão + testes. Verificação em produção real em andamento.
+
+---
+
+## 2026-09-02/03 (3) — Confirmação em produção do DEC-109; noite de instabilidade real do GSUS
+
+**Confirmação pendente da entrada anterior, fechada agora:** a execução de 12:37 confirmou a sobreposição real das duas fases -- log mostra "Processando paciente 9 de 180" e "Analisando paciente com IA" no mesmo segundo (12:41:56), com a Fase 1 seguindo pro paciente 10 onze segundos depois enquanto a análise do paciente 9 ainda rodava em segundo plano. Fase 1 completou os 180 pacientes em 59min (12:40→13:39); a Fase 2 já tinha processado boa parte da fila durante esse tempo, drenando o restante até 15:44. Nenhum travamento, nenhuma thread órfã, encerramento limpo (`Concluído.` seguido de `llama-server encerrado`). Cobertura subiu de 77,8% (antes desta run) pra 83,9% (151/180) ao final.
+
+**Duas execuções seguintes (noite/madrugada, a pedido do usuário pra fechar os pacientes restantes) expuseram uma instabilidade real e severa do GSUS nesse período**, não relacionada a nenhum código desta sessão:
+- 18:08: censo capturou só 20 pacientes antes de esgotar retry de paginação -- tratado corretamente como incompleto (`GSUSCensusIncompleteError`, DEC-080/108), `mark_patients_inactive_not_in` pulado, nenhum paciente marcado como alta indevidamente. Todos os 20 coletados falharam na extração (mesma categoria já documentada: marcador "Permanece Internado" não confirmado).
+- 19:07-00:48 (quase 6h de execução): censo desta vez capturou 178 pacientes, validado como completo pelo DEC-108. Mas 100 de 178 falharam na extração (56%) -- ritmo de ~2,5min/paciente boa parte da noite (contra ~20s/paciente na execução saudável da tarde), confirmando GSUS genuinamente degradado, não um bug novo. `Atualização automática concluída: {'found': 178, 'completed': 44, 'failed': 100, 'no_admission': 34}`.
+
+**Estado do banco ao final da madrugada:** 178 pacientes ativos, 143 com análise de IA (80,3%), 15 runs COMPLETED / 8 FAILED no histórico total, zero runs presas em RUNNING, zero linha órfã na fila. Confirmado por auditoria independente (ver entrada seguinte) via consulta agregada read-only.
+
+**Resultado:** PASS -- DEC-109 confirmado funcionando em produção real, inclusive sob carga/instabilidade real do GSUS (nunca travou, nunca vazou thread, nunca marcou paciente errado). A queda de cobertura da madrugada é limitação de ambiente (GSUS), não defeito do sistema.
+
+---
+
+## 2026-09-03 (1) — Auditoria de prontidão para entrega desta semana
+
+**Pedido do usuário:** "como devemos prosseguir para entregar o produto final ainda essa semana?"
+
+**Método:** 6 agentes independentes em paralelo, cada um relendo código/testes/banco do zero (não recall de sessão) -- requisitos funcionais (RF-01 a RF-30) vs. código real, suíte de testes fresca, itens conscientemente adiados em TASKS.md/DECISIONS.md, estado do banco de produção (read-only, agregado), prontidão de build/instalador, completude da interface vs. especificação.
+
+**Achados principais:**
+- Todos os RF-01 a RF-25 e RF-27 confirmados implementados com evidência de código real (arquivo:função), nenhuma violação de escopo (seção 5).
+- Suíte: 362/362 passed (unit+e2e), 0 falhas reais. Os 10 erros de integração seguem sendo o mesmo problema local de Chromium (não usado pelo app real, que usa Firefox -- DEC-010), reconfirmado como não-regressão.
+- Banco de produção saudável (ver entrada anterior).
+- Interface: "funcional mas simples" -- zero placeholder/dado fake, tudo ligado a consulta real. Simplicidade visual é decisão consciente do usuário (adiada em pelo menos 6 entradas anteriores desta mesma sessão), não lacuna funcional.
+- Instalador atual não está desatualizado -- já contém o fix do DEC-109.
+- Gaps genuínos e conscientes, nenhum bloqueador: cluster RESIL-001 (resiliência de automação GSUS, adiado por escopo/tempo desde DEC-091), RF-26 completo e RF-30-override (a própria especificação já rotula como "mecanismo futuro"), RF-28 histórico de causa de dia vermelho (adiado por privacidade, DEC-101), algumas anotações desatualizadas em TASKS.md (E2E-001 marcado como não feito apesar de testado extensivamente).
+
+**Decisão do usuário após ver o relatório:** disparar mais uma execução real durante o dia (pra fechar cobertura + reconfirmar estabilidade) e **incluir o design/UX da tela nesta entrega** (revertendo o adiamento anterior -- agora que o resto está confirmado funcional, o usuário optou por investir tempo no visual antes de considerar entregue).
+
+**Próxima task:** design/UX da tela principal (Tkinter), com o restante do sistema já certificado.
