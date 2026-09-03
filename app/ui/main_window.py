@@ -43,6 +43,37 @@ logger = logging.getLogger(__name__)
 PRIORITY_COLORS = {"ALTA": "#b3261e", "MEDIA": "#b8860b", "MONITORAMENTO": "#2e7d32"}
 ORIGIN_LABELS = {"INTERNA": "Interna", "EXTERNA": "Externa", "NAO_DEFINIDA": "Não definida"}
 
+# Paleta única da tela (design/UX, 2026-09-03 -- pedido explícito do usuário
+# de incluir o polimento visual nesta entrega, depois de meses adiado). Só
+# cor/tipografia/espaçamento -- nenhum widget muda de identidade (mesmos
+# atributos que os testes já esperam: `_kpi_labels`, `_census_tree`,
+# `status_label`, `update_button`). Vermelho/âmbar/verde continuam os MESMOS
+# de PRIORITY_COLORS -- mudar essas cores quebraria a linguagem visual
+# compartilhada com o relatório HTML.
+BG_COLOR = "#f2f4f7"
+CARD_BG = "#ffffff"
+CARD_BORDER = "#dde1e6"
+BRAND_COLOR = "#1f5f8b"
+BRAND_COLOR_DARK = "#15486b"
+TEXT_PRIMARY = "#1f2937"
+TEXT_MUTED = "#6b7280"
+FONT_FAMILY = "Segoe UI"
+
+# Cor de destaque no topo de cada cartão de KPI -- neutra (BRAND_COLOR) pra
+# indicadores informativos, vermelha pros dois números que pedem atenção
+# imediata do auditor (EDD vencida, dia vermelho hoje), verde pro indicador
+# positivo (dia verde). Nunca reinterpreta severidade clínica além do que já
+# está em PRIORITY_COLORS -- só reaproveita a mesma linguagem.
+KPI_ACCENTS = {
+    "total_active": BRAND_COLOR,
+    "with_pending": BRAND_COLOR,
+    "without_edd": PRIORITY_COLORS["MEDIA"],
+    "edd_overdue": PRIORITY_COLORS["ALTA"],
+    "dia_vermelho": PRIORITY_COLORS["ALTA"],
+    "dia_verde": PRIORITY_COLORS["MONITORAMENTO"],
+    "median_resolution": BRAND_COLOR,
+}
+
 # Achado de auditoria de certificação pré-entrega (2026-09-01, RF-29): a
 # tabela não tinha DIH/Contexto/Pendência principal (descrição real, não só
 # categoria) -- o requisito pede as 7 colunas explicitamente (leito, DIH,
@@ -83,6 +114,51 @@ def _format_edd_cell(edd_status: str | None, edd_overdue: bool) -> str:
     return "em dia"
 
 
+def configure_app_style() -> None:
+    """Estilo ttk único da aplicação (design/UX, 2026-09-03) -- função de
+    módulo, não método, porque `SetupWindow`/`LookupWindow` (telas menores,
+    fora deste arquivo) também precisam dele e podem abrir ANTES de
+    `MainWindow` alguma vez existir (ex.: primeira execução, tela de
+    configuração inicial). `ttk.Style()` é compartilhado por todo o
+    processo Tk -- chamar de novo depois é seguro e barato (apenas
+    reconfigura os mesmos nomes de estilo).
+
+    `clam` é o único tema ttk que respeita cor de fundo/primeiro-plano
+    custom de forma consistente no Windows -- os temas nativos
+    (`vista`/`winnative`) ignoram `background`/`foreground` em `ttk.Button`
+    na prática, então não dava pra aplicar a paleta sem trocar de tema."""
+    style = ttk.Style()
+    style.theme_use("clam")
+
+    style.configure(
+        "Primary.TButton", background=BRAND_COLOR, foreground="white",
+        font=(FONT_FAMILY, 10, "bold"), padding=(16, 9), borderwidth=0,
+    )
+    style.map(
+        "Primary.TButton",
+        background=[("disabled", "#9db8c8"), ("active", BRAND_COLOR_DARK)],
+        foreground=[("disabled", "#eef3f7")],
+    )
+    style.configure(
+        "Secondary.TButton", background=CARD_BG, foreground=BRAND_COLOR,
+        font=(FONT_FAMILY, 10), padding=(14, 9), borderwidth=1, relief="solid",
+    )
+    style.map("Secondary.TButton", background=[("active", "#eaf1f6")])
+
+    style.configure(
+        "Treeview", background=CARD_BG, fieldbackground=CARD_BG, foreground=TEXT_PRIMARY,
+        rowheight=26, font=(FONT_FAMILY, 9), borderwidth=0,
+    )
+    style.configure(
+        "Treeview.Heading", background=BRAND_COLOR, foreground="white",
+        font=(FONT_FAMILY, 9, "bold"), relief="flat", padding=(6, 6),
+    )
+    style.map("Treeview.Heading", background=[("active", BRAND_COLOR_DARK)])
+    style.map("Treeview", background=[("selected", BRAND_COLOR)], foreground=[("selected", "white")])
+
+    style.configure("TEntry", padding=(6, 5))
+
+
 class MainWindow:
     DASHBOARD_REFRESH_INTERVAL_MS = 60_000
 
@@ -111,10 +187,12 @@ class MainWindow:
         root.geometry("1200x820")
         root.minsize(1024, 700)
         root.resizable(True, True)
+        root.configure(bg=BG_COLOR)
         root.grid_columnconfigure(0, weight=1)
         root.grid_rowconfigure(3, weight=3)  # gráficos
         root.grid_rowconfigure(5, weight=2)  # tabela de censo
 
+        self._build_style()
         self._build_control_bar(root)
         self._build_kpi_cards(root)
         self._build_charts(root)
@@ -136,34 +214,50 @@ class MainWindow:
             self.on_lookup()
 
     # ------------------------------------------------------------- layout
+    def _build_style(self) -> None:
+        configure_app_style()
+
     def _build_control_bar(self, root: tk.Tk) -> None:
-        bar = tk.Frame(root)
-        bar.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 8))
+        bar = tk.Frame(root, bg=BG_COLOR)
+        bar.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
         bar.grid_columnconfigure(4, weight=1)
         self._control_bar = bar
         bar.bind("<Destroy>", self._on_control_bar_destroyed)
 
-        tk.Label(bar, text="AUDITORIA GSUS", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            bar, text="AUDITORIA GSUS", font=(FONT_FAMILY, 16, "bold"), bg=BG_COLOR, fg=BRAND_COLOR_DARK,
+        ).grid(row=0, column=0, sticky="w")
 
-        self.update_button = tk.Button(bar, text="ATUALIZAR AGORA", command=self._on_update)
-        self.update_button.grid(row=0, column=1, padx=(16, 6))
-        tk.Button(bar, text="ABRIR RELATÓRIO", command=self._on_open_report).grid(row=0, column=2, padx=6)
-        tk.Button(bar, text="LOCALIZAR PACIENTE", command=self._on_lookup).grid(row=0, column=3, padx=6)
+        self.update_button = ttk.Button(
+            bar, text="ATUALIZAR AGORA", command=self._on_update, style="Primary.TButton",
+        )
+        self.update_button.grid(row=0, column=1, padx=(20, 6))
+        ttk.Button(
+            bar, text="ABRIR RELATÓRIO", command=self._on_open_report, style="Secondary.TButton",
+        ).grid(row=0, column=2, padx=6)
+        ttk.Button(
+            bar, text="LOCALIZAR PACIENTE", command=self._on_lookup, style="Secondary.TButton",
+        ).grid(row=0, column=3, padx=6)
 
-        info = tk.Frame(bar)
+        info = tk.Frame(bar, bg=BG_COLOR)
         info.grid(row=0, column=5, sticky="e")
-        tk.Label(info, text=f"Setor: {self.app_config.unit}", fg="#777").pack(anchor="e")
-        tk.Label(info, text=f"Próxima atualização: {self.app_config.schedule_time}", fg="#777").pack(anchor="e")
+        tk.Label(info, text=f"Setor: {self.app_config.unit}", font=(FONT_FAMILY, 9), bg=BG_COLOR, fg=TEXT_MUTED).pack(anchor="e")
+        tk.Label(
+            info, text=f"Próxima atualização: {self.app_config.schedule_time}",
+            font=(FONT_FAMILY, 9), bg=BG_COLOR, fg=TEXT_MUTED,
+        ).pack(anchor="e")
 
-        settings_label = tk.Label(bar, text="Configurações", fg="#3366cc", cursor="hand2")
+        settings_label = tk.Label(bar, text="Configurações", font=(FONT_FAMILY, 9, "underline"), bg=BG_COLOR, fg=BRAND_COLOR, cursor="hand2")
         settings_label.grid(row=0, column=6, padx=(16, 0))
         settings_label.bind("<Button-1>", lambda _event: self._on_settings())
 
-        self.status_label = tk.Label(bar, text=self._initial_status_text(), fg="#555", justify="left")
-        self.status_label.grid(row=1, column=0, columnspan=7, sticky="w", pady=(8, 0))
+        self.status_label = tk.Label(
+            bar, text=self._initial_status_text(), font=(FONT_FAMILY, 9), bg=BG_COLOR, fg=TEXT_MUTED, justify="left",
+        )
+        self.status_label.grid(row=1, column=0, columnspan=7, sticky="w", pady=(10, 0))
 
     def _build_kpi_cards(self, root: tk.Tk) -> None:
-        frame = tk.Frame(root)
+        frame = tk.Frame(root, bg=BG_COLOR)
         frame.grid(row=1, column=0, sticky="ew", padx=16, pady=8)
 
         cards = [
@@ -177,11 +271,14 @@ class MainWindow:
         ]
         for i, (key, title) in enumerate(cards):
             frame.grid_columnconfigure(i, weight=1)
-            card = tk.Frame(frame, bg="#fff", highlightbackground="#ddd", highlightthickness=1)
+            card = tk.Frame(frame, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
             card.grid(row=0, column=i, sticky="nsew", padx=4)
-            value_label = tk.Label(card, text="—", font=("Segoe UI", 18, "bold"), bg="#fff")
-            value_label.pack(pady=(10, 0))
-            tk.Label(card, text=title, fg="#666", bg="#fff", wraplength=140, justify="center").pack(pady=(0, 10))
+            tk.Frame(card, bg=KPI_ACCENTS.get(key, BRAND_COLOR), height=4).pack(fill="x", side="top")
+            value_label = tk.Label(card, text="—", font=(FONT_FAMILY, 22, "bold"), bg=CARD_BG, fg=TEXT_PRIMARY)
+            value_label.pack(pady=(12, 0))
+            tk.Label(
+                card, text=title, font=(FONT_FAMILY, 9), fg=TEXT_MUTED, bg=CARD_BG, wraplength=140, justify="center",
+            ).pack(pady=(2, 12))
             self._kpi_labels[key] = value_label
 
     def _build_charts(self, root: tk.Tk) -> None:
@@ -192,33 +289,55 @@ class MainWindow:
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-        charts_frame = tk.Frame(root)
+        charts_frame = tk.Frame(root, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
         charts_frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=8)
 
-        self._fig = Figure(figsize=(11, 5), dpi=100, constrained_layout=True)
+        self._fig = Figure(figsize=(11, 5), dpi=100, constrained_layout=True, facecolor=CARD_BG)
         axes = self._fig.subplots(2, 2)
         self._ax_category, self._ax_priority = axes[0]
         self._ax_origin, self._ax_trend = axes[1]
 
         self._chart_canvas = FigureCanvasTkAgg(self._fig, master=charts_frame)
-        self._chart_canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._chart_canvas.get_tk_widget().configure(bg=CARD_BG, highlightthickness=0)
+        self._chart_canvas.get_tk_widget().pack(fill="both", expand=True, padx=8, pady=8)
+
+    def _style_axes(self, ax) -> None:
+        """Espinha/eixo consistentes entre os 4 gráficos (design/UX,
+        2026-09-03) -- sem isto cada `ax.clear()` (chamado a cada refresh)
+        voltava pro visual padrão do matplotlib (moldura preta fechada nos 4
+        lados), destoando do resto da tela."""
+        ax.set_facecolor(CARD_BG)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(CARD_BORDER)
+        ax.tick_params(colors=TEXT_MUTED, labelsize=8)
+        ax.title.set_color(TEXT_PRIMARY)
+        ax.title.set_fontsize(10)
+        ax.title.set_fontweight("bold")
 
     def _build_unit_strip(self, root: tk.Tk) -> None:
-        self._unit_strip = tk.Label(root, text="", fg="#555", justify="left", anchor="w", wraplength=1150)
+        self._unit_strip = tk.Label(
+            root, text="", font=(FONT_FAMILY, 9), fg=TEXT_MUTED, bg=BG_COLOR,
+            justify="left", anchor="w", wraplength=1150,
+        )
         self._unit_strip.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 4))
 
     def _build_census_table(self, root: tk.Tk) -> None:
-        frame = tk.Frame(root)
-        frame.grid(row=5, column=0, sticky="nsew", padx=16, pady=(0, 12))
+        frame = tk.Frame(root, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
+        frame.grid(row=5, column=0, sticky="nsew", padx=16, pady=(0, 14))
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(1, weight=1)
 
-        filter_row = tk.Frame(frame)
-        filter_row.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        tk.Label(filter_row, text="Filtrar (leito/prontuário/unidade/categoria/pendência):").pack(side="left")
+        filter_row = tk.Frame(frame, bg=CARD_BG)
+        filter_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
+        tk.Label(
+            filter_row, text="Filtrar (leito/prontuário/unidade/categoria/pendência):",
+            font=(FONT_FAMILY, 9), bg=CARD_BG, fg=TEXT_PRIMARY,
+        ).pack(side="left")
         self._census_filter_var = tk.StringVar()
         self._census_filter_var.trace_add("write", lambda *_args: self._apply_census_filter())
-        tk.Entry(filter_row, textvariable=self._census_filter_var, width=30).pack(side="left", padx=(8, 0))
+        ttk.Entry(filter_row, textvariable=self._census_filter_var, width=30).pack(side="left", padx=(8, 0))
 
         columns = [col_id for col_id, _label, _width in CENSUS_COLUMNS]
         self._census_tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
@@ -227,7 +346,12 @@ class MainWindow:
             self._census_tree.column(col_id, width=width, anchor="w")
         for priority, color in PRIORITY_COLORS.items():
             self._census_tree.tag_configure(priority, foreground=color)
-        self._census_tree.grid(row=1, column=0, sticky="nsew")
+        # Listras alternadas (design/UX, 2026-09-03) -- linha de fundo só,
+        # combinada com a tag de prioridade (cor do texto) no mesmo item;
+        # tags diferentes controlam propriedades diferentes sem conflito.
+        self._census_tree.tag_configure("oddrow", background=CARD_BG)
+        self._census_tree.tag_configure("evenrow", background="#f5f7fa")
+        self._census_tree.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=(0, 10))
 
         vscroll = ttk.Scrollbar(frame, orient="vertical", command=self._census_tree.yview)
         self._census_tree.configure(yscrollcommand=vscroll.set)
@@ -403,53 +527,62 @@ class MainWindow:
 
     def _render_bar_chart(self, ax, counts: dict[str, int], title: str) -> None:
         ax.clear()
-        ax.set_title(title, fontsize=10)
+        self._style_axes(ax)
+        ax.set_title(title)
         if not counts:
-            ax.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=ax.transAxes, color="#999")
+            ax.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=ax.transAxes, color=TEXT_MUTED)
             ax.set_xticks([])
             ax.set_yticks([])
             return
         labels = list(counts.keys())
         values = [counts[label] for label in labels]
-        ax.barh(labels, values, color="#3366cc")
-        ax.tick_params(axis="both", labelsize=8)
+        ax.barh(labels, values, color=BRAND_COLOR)
 
     def _render_priority_chart(self, by_priority: dict[str, int]) -> None:
         ax = self._ax_priority
         ax.clear()
-        ax.set_title("Pendências por prioridade", fontsize=10)
+        self._style_axes(ax)
+        ax.set_title("Pendências por prioridade")
         order = ["ALTA", "MEDIA", "MONITORAMENTO"]
         present = [p for p in order if by_priority.get(p)]
         if not present:
-            ax.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=ax.transAxes, color="#999")
+            ax.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=ax.transAxes, color=TEXT_MUTED)
             ax.set_xticks([])
             ax.set_yticks([])
             return
         values = [by_priority[p] for p in present]
         colors = [PRIORITY_COLORS[p] for p in present]
-        ax.pie(values, labels=present, colors=colors, autopct="%1.0f%%", textprops={"fontsize": 8})
+        ax.pie(
+            values, labels=present, colors=colors, autopct="%1.0f%%", textprops={"fontsize": 8, "color": "white"},
+            wedgeprops={"edgecolor": CARD_BG, "linewidth": 1.5},
+        )
 
     def _render_origin_chart(self, by_origin: dict[str, int]) -> None:
         ax = self._ax_origin
         ax.clear()
-        ax.set_title("Barreiras: interno × externo", fontsize=10)
+        self._style_axes(ax)
+        ax.set_title("Barreiras: interno × externo")
         if not by_origin:
-            ax.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=ax.transAxes, color="#999")
+            ax.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=ax.transAxes, color=TEXT_MUTED)
             ax.set_xticks([])
             ax.set_yticks([])
             return
         labels = [ORIGIN_LABELS.get(key, key) for key in by_origin]
         values = list(by_origin.values())
-        ax.pie(values, labels=labels, autopct="%1.0f%%", textprops={"fontsize": 8})
+        ax.pie(
+            values, labels=labels, colors=[BRAND_COLOR, "#7aa9c4"], autopct="%1.0f%%",
+            textprops={"fontsize": 8, "color": "white"}, wedgeprops={"edgecolor": CARD_BG, "linewidth": 1.5},
+        )
 
     def _render_trend_chart(self, snapshots) -> None:
         ax = self._ax_trend
         ax.clear()
-        ax.set_title("Tendência de dias vermelhos", fontsize=10)
+        self._style_axes(ax)
+        ax.set_title("Tendência de dias vermelhos")
         if len(snapshots) < 2:
             ax.text(
                 0.5, 0.5, "Ainda sem histórico suficiente\n(acumula a cada execução)",
-                ha="center", va="center", transform=ax.transAxes, color="#999", fontsize=8,
+                ha="center", va="center", transform=ax.transAxes, color=TEXT_MUTED, fontsize=8,
             )
             ax.set_xticks([])
             ax.set_yticks([])
@@ -457,11 +590,10 @@ class MainWindow:
         x = list(range(len(snapshots)))
         y = [row["patients_dia_vermelho"] for row in snapshots]
         labels = [row["created_at"][5:10] for row in snapshots]  # MM-DD
-        ax.plot(x, y, color="#b3261e", marker="o", markersize=3)
+        ax.plot(x, y, color=PRIORITY_COLORS["ALTA"], marker="o", markersize=4, linewidth=2)
         step = max(len(labels) // 6, 1)
         ax.set_xticks(x[::step])
         ax.set_xticklabels(labels[::step], rotation=45, ha="right")
-        ax.tick_params(axis="both", labelsize=7)
 
     def _render_unit_strip(self, unit_census) -> None:
         if not unit_census:
@@ -528,7 +660,7 @@ class MainWindow:
             rows.sort(key=lambda r: self._census_sort_key(r, column), reverse=self._census_sort_state["reverse"])
 
         self._census_tree.delete(*self._census_tree.get_children())
-        for row in rows:
+        for i, row in enumerate(rows):
             context = row.clinical_context or ""
             context_short = (context[:CONTEXT_MAX_CHARS] + "…") if len(context) > CONTEXT_MAX_CHARS else context
             values = (
@@ -545,7 +677,8 @@ class MainWindow:
                 _format_edd_cell(row.edd_status, row.edd_overdue),
                 row.dia_classificacao or "—",
             )
-            self._census_tree.insert("", "end", iid=row.record_number, values=values, tags=(row.main_priority,))
+            stripe = "evenrow" if i % 2 == 0 else "oddrow"
+            self._census_tree.insert("", "end", iid=row.record_number, values=values, tags=(row.main_priority, stripe))
 
     def _on_census_row_open(self) -> None:
         selection = self._census_tree.selection()

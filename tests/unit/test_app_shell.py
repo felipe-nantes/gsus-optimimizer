@@ -6,6 +6,7 @@ Cria no máximo UM tk.Tk() por teste (várias instâncias no mesmo processo
 Python são conhecidas por serem instáveis nesta versão de Tcl/Tk no Windows).
 """
 import tkinter as tk
+from tkinter import ttk
 
 import pytest
 
@@ -28,8 +29,11 @@ pytestmark = pytest.mark.skipif(not _tk_available(), reason="Sem display Tk disp
 def _find_buttons_recursive(widget) -> list[tk.Button]:
     """`MainWindow` (REPORT-004/DEC-099) passou a agrupar os botões dentro
     de frames (barra de controle) em vez de serem filhos diretos de `root`
-    -- uma busca só em `root.winfo_children()` não os encontra mais."""
-    found = [w for w in widget.winfo_children() if isinstance(w, tk.Button)]
+    -- uma busca só em `root.winfo_children()` não os encontra mais.
+    `ttk.Button` (design/UX, 2026-09-03) não é subclasse de `tk.Button` --
+    precisa checar as duas classes, senão os botões da tela principal
+    (agora `ttk.Button`, pro estilo customizado) somem desta busca."""
+    found = [w for w in widget.winfo_children() if isinstance(w, (tk.Button, ttk.Button))]
     for child in widget.winfo_children():
         found.extend(_find_buttons_recursive(child))
     return found
@@ -49,7 +53,7 @@ def test_build_app_shows_setup_when_not_configured(tmp_path, monkeypatch):
     root = main.build_app()
     try:
         assert root.title() == "GSUS Auditoria"
-        buttons = [w for w in root.winfo_children() if isinstance(w, tk.Button)]
+        buttons = [w for w in root.winfo_children() if isinstance(w, (tk.Button, ttk.Button))]
         assert any(b["text"] == "CONCLUIR" for b in buttons)
     finally:
         root.destroy()

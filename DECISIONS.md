@@ -2052,3 +2052,23 @@ Assimetria de risco deliberada: um falso positivo aqui (tratar um censo genuinam
 **Resultado:** rebuild + reinstalação silenciosa aplicada, execução real disparada em produção pra confirmar as duas fases sobrepondo de verdade (ver CURRENT_STATE.md).
 
 **Impacto:** `app/orchestrator.py` (`_llm_phase2_worker`, `_get_db_path`, `_LLM_QUEUE_DONE`, restruturação de `run_once`), `app/storage/database.py` (`busy_timeout`), `app/reports/html_report.py` (nome de arquivo temporário por thread, pré-requisito de segurança pra Fase 2 e o `report()` do fim da Fase 1 regravarem o relatório ao mesmo tempo sem colidir). Nenhuma mudança de schema.
+
+---
+
+## DEC-110 — Design/UX da tela (UI-005): paleta única, tema ttk `clam`, estilo compartilhado entre as 3 telas
+
+**Contexto:** design/UX da tela ficou adiado desde 2026-08-31/09-01 ("resto funcional primeiro" -- ver histórico de CURRENT_STATE.md 2026-09-01). Auditoria de prontidão pra entrega (2026-09-03) confirmou o resto do sistema sólido; usuário decidiu incluir o polimento visual nesta entrega.
+
+**Decisão:** paleta única (`app/ui/main_window.py`: `BG_COLOR`/`CARD_BG`/`CARD_BORDER`/`BRAND_COLOR`/`BRAND_COLOR_DARK`/`TEXT_PRIMARY`/`TEXT_MUTED`/`FONT_FAMILY`), aplicada nas 3 telas (principal, configuração inicial, localizar paciente). Cores de prioridade (`PRIORITY_COLORS`, ALTA/MEDIA/MONITORAMENTO) NUNCA foram alteradas -- são a mesma linguagem visual já compartilhada com o relatório HTML, mudar isso quebraria essa consistência. Cartões de KPI ganharam uma faixa de destaque no topo (`KPI_ACCENTS`) -- neutra (cor da marca) pros indicadores informativos, vermelha pros dois que pedem atenção imediata (EDD vencida, dia vermelho), verde pro indicador positivo (dia verde) -- sem reinterpretar severidade clínica além do que `PRIORITY_COLORS` já define.
+
+**Tema ttk `clam`:** único tema ttk que respeita `background`/`foreground` customizados em `ttk.Button` de forma consistente no Windows -- os temas nativos (`vista`/`winnative`, os defaults) ignoram essas opções na prática para botões, então não dava pra aplicar cor de marca aos botões sem trocar de tema. Efeito colateral aceito: botões/Treeview perdem o verniz nativo do Windows em troca de controle total de cor.
+
+**`configure_app_style()` como função de módulo, não método:** achado durante a implementação -- `SetupWindow`/`LookupWindow` (telas menores, arquivos próprios) podem abrir ANTES de `MainWindow` alguma vez existir no processo (ex.: primeira execução, sem configuração ainda -- vai direto pra `SetupWindow`). Se o estilo só fosse configurado dentro de `MainWindow.__init__`, os botões dessas telas menores renderizariam sem a paleta customizada nesse cenário. `ttk.Style()` é compartilhado por todo o processo Tk e chamar `configure_app_style()` de novo depois é seguro e barato (só reconfigura os mesmos nomes) -- as 3 telas chamam a mesma função no início do `__init__`.
+
+**Achado incidental (não é regressão de produto, é lacuna de teste):** 2 testes localizavam botões via `isinstance(w, tk.Button)`, que não reconhece `ttk.Button` (classes não relacionadas por herança) -- os testes paravam de encontrar os botões reais depois da troca pra `ttk.Button`. Corrigidos pra checar `isinstance(w, (tk.Button, ttk.Button))`.
+
+**Verificação:** nenhum widget mudou de identidade (mesmos atributos que os testes já esperavam: `_kpi_labels`, `_census_tree`, `status_label`, `update_button`). Verificado visualmente com dados 100% sintéticos nas 3 telas (nunca o banco real -- ver nota de segurança abaixo). Suíte completa: 362 passed.
+
+**Nota de segurança (achado real desta sessão, não repetir):** ao planejar este trabalho, a primeira tentativa de ver a tela "antes" usou um script de screenshot antigo apontado pro banco de PRODUÇÃO real -- capturou prontuário e contexto clínico reais numa imagem, que então entrou no contexto da IA ao ser visualizada. Erro reconhecido e corrigido na hora (imagens apagadas, nada reproduzido); o design de fato foi feito e verificado inteiramente contra `smoke_dashboard.py` (scratchpad, dados fictícios `F0001`-`F0006`, nunca toca `auditoria.db` real). Lição: qualquer verificação visual futura da tela DEVE usar dado sintético, nunca o banco de produção, mesmo pra uso interno de quem está desenvolvendo.
+
+**Impacto:** `app/ui/main_window.py` (constantes de paleta, `configure_app_style()`, `_style_axes()`), `app/ui/setup_window.py`, `app/ui/lookup_window.py`, `tests/unit/test_app_shell.py` (2 asserts corrigidos). Nenhuma mudança de schema, nenhuma mudança de comportamento funcional -- só aparência.

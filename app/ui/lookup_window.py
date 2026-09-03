@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import webbrowser
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 import tkinter as tk
 from typing import Callable
 
@@ -18,6 +18,7 @@ from app import config
 from app.reports.html_report import PatientLookupResult, generate_patient_report
 from app.storage import database
 from app.storage.repository import Repository
+from app.ui.main_window import BG_COLOR, BRAND_COLOR, BRAND_COLOR_DARK, FONT_FAMILY, TEXT_MUTED, configure_app_style
 
 logger = logging.getLogger(__name__)
 
@@ -42,31 +43,39 @@ class LookupWindow:
         # dashboard e abre gigante em vez do tamanho compacto pedido acima.
         root.resizable(False, False)
         root.minsize(1, 1)
+        root.configure(bg=BG_COLOR)
+        configure_app_style()
 
-        tk.Label(root, text="LOCALIZAR PACIENTE", font=("Segoe UI", 14, "bold")).pack(pady=(16, 4))
+        tk.Label(
+            root, text="LOCALIZAR PACIENTE", font=(FONT_FAMILY, 14, "bold"), bg=BG_COLOR, fg=BRAND_COLOR_DARK,
+        ).pack(pady=(18, 4))
         tk.Label(
             root,
             text="Busca o relatório já processado desse prontuário (só pacientes "
             "ainda internados) -- não acessa o GSUS ao vivo.",
-            fg="#666",
+            font=(FONT_FAMILY, 9),
+            bg=BG_COLOR,
+            fg=TEXT_MUTED,
             wraplength=380,
             justify="center",
-        ).pack(pady=(0, 12))
+        ).pack(pady=(0, 14))
 
-        form = tk.Frame(root)
+        form = tk.Frame(root, bg=BG_COLOR)
         form.pack(padx=16, fill="x")
-        tk.Label(form, text="Nº Prontuário:").pack(side="left")
+        tk.Label(form, text="Nº Prontuário:", font=(FONT_FAMILY, 9), bg=BG_COLOR).pack(side="left")
         self.record_number_var = tk.StringVar()
-        entry = tk.Entry(form, textvariable=self.record_number_var, width=20)
+        entry = ttk.Entry(form, textvariable=self.record_number_var, width=20)
         entry.pack(side="left", padx=(8, 8))
         entry.bind("<Return>", lambda _event: self._on_search())
-        tk.Button(form, text="Localizar", command=self._on_search).pack(side="left")
+        ttk.Button(form, text="Localizar", command=self._on_search, style="Primary.TButton").pack(side="left")
 
-        self.status_label = tk.Label(root, text="", fg="#555", wraplength=380, justify="center")
-        self.status_label.pack(pady=(16, 4))
+        self.status_label = tk.Label(
+            root, text="", font=(FONT_FAMILY, 9), bg=BG_COLOR, fg=TEXT_MUTED, wraplength=380, justify="center",
+        )
+        self.status_label.pack(pady=(18, 4))
 
-        back_label = tk.Label(root, text="Voltar", fg="#3366cc", cursor="hand2")
-        back_label.pack(pady=(16, 12))
+        back_label = tk.Label(root, text="Voltar", font=(FONT_FAMILY, 9, "underline"), bg=BG_COLOR, fg=BRAND_COLOR, cursor="hand2")
+        back_label.pack(pady=(16, 14))
         back_label.bind("<Button-1>", lambda _event: self.on_back())
 
     def _on_search(self) -> None:

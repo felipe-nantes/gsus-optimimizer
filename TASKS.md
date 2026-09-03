@@ -538,7 +538,29 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
 
 ```
 [ ] RULES-002    Regras determinísticas adicionais validadas por usuário clínico
-[ ] REPORT-002   Refinamentos visuais do relatório (CSS)
+[x] UI-005       Design/UX da tela principal, tela de configuração e tela de localizar
+                 paciente (2026-09-03) -- adiado explicitamente desde 2026-09-01 ("resto
+                 funcional primeiro"), incluído nesta entrega por decisão do usuário após a
+                 auditoria de prontidão confirmar que o resto do sistema já estava sólido.
+                 Paleta única (azul de marca + as MESMAS cores de prioridade já usadas no
+                 relatório HTML, PRIORITY_COLORS -- nunca reinterpretadas), tipografia
+                 consistente (Segoe UI), cartões de KPI com faixa de destaque colorida no
+                 topo, botões ttk customizados (tema `clam`, único que respeita cor
+                 customizada de botão no Windows), gráficos matplotlib com espinha/eixo
+                 consistentes com o resto da tela, listras alternadas na tabela de censo.
+                 `configure_app_style()` extraída como função de módulo (não método) porque
+                 as telas de Configuração/Localizar Paciente podem abrir ANTES da tela
+                 principal alguma vez existir (primeira execução). Nenhum widget mudou de
+                 identidade -- mesmos atributos que os testes já esperavam
+                 (`_kpi_labels`, `_census_tree`, `status_label`, `update_button`).
+                 Achado incidental: 2 testes localizavam botões só por `isinstance(w,
+                 tk.Button)`, que não reconhece `ttk.Button` -- corrigidos pra checar as
+                 duas classes.
+                 Testes: 362 passed (mesma suíte, +correção de 2 testes de detecção de
+                 botão). Verificado visualmente com dados 100% sintéticos (nunca banco real)
+                 nas 3 telas.
+[ ] REPORT-002   Refinamentos visuais do relatório (CSS) -- fora de escopo desta rodada
+                 (UI-005 cobriu só a tela Tkinter, não o relatório HTML)
 [x] REPORT-003   Indicadores agregados do serviço (RF-28/RF-29, seção 12 da orientação técnica
                  de auditoria concorrente) -- PLANEJADO em detalhe 2026-09-01 (DEC-099), pedido
                  explícito do usuário pra avançar às "fases finais do projeto". Passou de "não

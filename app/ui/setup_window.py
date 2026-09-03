@@ -4,11 +4,12 @@ from __future__ import annotations
 import logging
 import sys
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 from typing import Callable
 
 from app import config, scheduling
 from app.security import credentials
+from app.ui.main_window import BG_COLOR, BRAND_COLOR_DARK, FONT_FAMILY, TEXT_PRIMARY, configure_app_style
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ class SetupWindow:
         self.app_config = app_config
         self.on_complete = on_complete
 
-        root.geometry("360x280")
+        root.geometry("380x300")
         # REPORT-004/DEC-099: `MainWindow` (tela única) tornou a janela raiz
         # redimensionável -- esta tela precisa voltar a fixar o tamanho
         # explicitamente, já que `app/main.py::render` só troca os widgets,
@@ -30,33 +31,39 @@ class SetupWindow:
         # mínimo herdado (1024x700) em vez do `geometry` pedido acima.
         root.resizable(False, False)
         root.minsize(1, 1)
+        root.configure(bg=BG_COLOR)
+        configure_app_style()
 
-        tk.Label(root, text="CONFIGURAÇÃO INICIAL", font=("Segoe UI", 12, "bold")).pack(pady=(16, 12))
+        tk.Label(
+            root, text="CONFIGURAÇÃO INICIAL", font=(FONT_FAMILY, 13, "bold"), bg=BG_COLOR, fg=BRAND_COLOR_DARK,
+        ).pack(pady=(20, 16))
 
-        form = tk.Frame(root)
-        form.pack(padx=24, fill="x")
+        form = tk.Frame(root, bg=BG_COLOR)
+        form.pack(padx=28, fill="x")
 
-        tk.Label(form, text="CPF (login GSUS):").grid(row=0, column=0, sticky="w", pady=4)
+        label_kwargs = {"bg": BG_COLOR, "fg": TEXT_PRIMARY, "font": (FONT_FAMILY, 9)}
+
+        tk.Label(form, text="CPF (login GSUS):", **label_kwargs).grid(row=0, column=0, sticky="w", pady=5)
         self.username_var = tk.StringVar(value=app_config.gsus_username)
-        tk.Entry(form, textvariable=self.username_var).grid(row=0, column=1, sticky="ew", pady=4)
+        ttk.Entry(form, textvariable=self.username_var).grid(row=0, column=1, sticky="ew", pady=5)
 
         has_saved_credential = credentials.get_credential("gsus") is not None
         password_label = "Senha (deixe em branco para manter a atual):" if has_saved_credential else "Senha:"
-        tk.Label(form, text=password_label).grid(row=1, column=0, sticky="w", pady=4)
+        tk.Label(form, text=password_label, **label_kwargs).grid(row=1, column=0, sticky="w", pady=5)
         self.password_var = tk.StringVar()
-        tk.Entry(form, textvariable=self.password_var, show="*").grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Entry(form, textvariable=self.password_var, show="*").grid(row=1, column=1, sticky="ew", pady=5)
 
-        tk.Label(form, text="Setor:").grid(row=2, column=0, sticky="w", pady=4)
+        tk.Label(form, text="Setor:", **label_kwargs).grid(row=2, column=0, sticky="w", pady=5)
         self.unit_var = tk.StringVar(value=app_config.unit)
-        tk.Entry(form, textvariable=self.unit_var).grid(row=2, column=1, sticky="ew", pady=4)
+        ttk.Entry(form, textvariable=self.unit_var).grid(row=2, column=1, sticky="ew", pady=5)
 
-        tk.Label(form, text="Horário da atualização:").grid(row=3, column=0, sticky="w", pady=4)
+        tk.Label(form, text="Horário da atualização:", **label_kwargs).grid(row=3, column=0, sticky="w", pady=5)
         self.schedule_var = tk.StringVar(value=app_config.schedule_time)
-        tk.Entry(form, textvariable=self.schedule_var).grid(row=3, column=1, sticky="ew", pady=4)
+        ttk.Entry(form, textvariable=self.schedule_var).grid(row=3, column=1, sticky="ew", pady=5)
 
         form.columnconfigure(1, weight=1)
 
-        tk.Button(root, text="CONCLUIR", command=self._on_submit).pack(pady=20)
+        ttk.Button(root, text="CONCLUIR", command=self._on_submit, style="Primary.TButton").pack(pady=24)
 
     def _on_submit(self) -> None:
         username = self.username_var.get().strip()
