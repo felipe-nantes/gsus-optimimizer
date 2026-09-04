@@ -35,7 +35,12 @@ a = Analysis(
     [os.path.join(PROJECT_ROOT, 'app', 'main.py')],
     pathex=[PROJECT_ROOT],
     binaries=[],
-    datas=[],
+    # O mesmo .ico do recurso do .exe vai também como arquivo ao lado do
+    # executável (contents_directory='.' -> <pasta do .exe>\assets\...), porque a
+    # janela Tk aplica esse arquivo em runtime (app/ui/icons.py::apply_window_icon,
+    # via config.resolve_app_path) -- assim título, barra de tarefas, atalho e
+    # Explorer mostram exatamente o mesmo símbolo.
+    datas=[(ICON_PATH, "assets")],
     hiddenimports=collect_submodules('numpy._core'),
     hookspath=[],
     hooksconfig={},

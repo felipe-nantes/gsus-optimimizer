@@ -1221,3 +1221,17 @@ Proxima task: design/UX da tela (pedido explicito anterior do usuario) apos a en
 **Pendente (ações do usuário):** fechar as 2 janelas da versão dev ainda abertas (`pythonw -m app.main`); abrir o app instalado → Configurações → Concluir para registrar a tarefa agendada (só o build empacotado registra); primeira execução real supervisionada com "Atualizar agora"; commit deste ciclo.
 
 **Achado registrado, não corrigido (DIAG-002):** `run_diagnosis.classify_top_level_exception` classifica qualquer `playwright.Error` como `FALHA_GSUS` ("o GSUS não respondeu a tempo"). Hoje isso rotulou 7 vezes um Firefox ausente na máquina como instabilidade do hospital -- exatamente o tipo de erro que o auditor não consegue distinguir sozinho. Ver DEC-114.
+
+---
+
+## 2026-09-04 — Ícone do Codex aplicado também à janela do programa; instalador 1.1.0 regenerado (DEC-115)
+
+**Pedido do usuário:** "mude o ícone do executável e do produto para o gerado pelo Codex".
+
+**Diagnóstico antes de mudar:** o `.exe` e o instalador 1.1.0 JÁ embutiam `assets/gsus-auditoria.ico` (confirmado extraindo o recurso de ícone do `.exe` instalado, do atalho da área de trabalho e do próprio `Setup.exe`). O que não usava o arquivo era a janela Tk: `apply_window_icon` desenhava um PhotoImage de 32 px com fundo branco e quadrados sem cantos arredondados -- diferente do símbolo do `.ico` que aparece no atalho e no Explorer. Segundo fator: após reinstalar, o Explorer pode manter em cache o ícone antigo dos atalhos.
+
+**Feito:** `app/ui/icons.py` passou a aplicar o próprio `.ico` via `root.iconbitmap(default=...)`, resolvido com `config.resolve_app_path("assets/gsus-auditoria.ico")` (dev: pasta do projeto; frozen: pasta do `.exe`), mantendo o PhotoImage como fallback quando o arquivo não existe; o spec do PyInstaller passou a copiar o `.ico` para `assets/` ao lado do `.exe` (`datas`). Novo `tests/unit/test_icons.py` (3 testes: resolução em dev, resolução em frozen, aplicação do `.ico` + fallback num único `tk.Tk()`). Rebuild: PyInstaller 18 s; teste de fumaça do `.exe` empacotado com pasta de dados temporária -- ícone da classe da janela lido via `GetClassLongPtr` e barra de título capturada via `PrintWindow`: símbolo do Codex, fundo transparente, cantos arredondados; 0 linhas de stderr. Inno Setup 108 s, `installer/output/GSUSAuditoria-Setup.exe` 120,0 MB, SHA-256 `00A95DAEEA4049EE30EC27BE1FFD66F9B5CCBAAF01EDE8B6F551460DC2781F71` (substitui o instalador de DEC-114). Reinstalado silenciosamente (exit 0): `.exe` idêntico ao dist testado por hash, `assets/gsus-auditoria.ico` presente na instalação, modelo/Firefox/runtime preservados, 1712 arquivos = dist, dados reais intactos. Cache de ícones do Explorer atualizado com `ie4uinit.exe -show`.
+
+**Verificação:** 331 unitários não visuais + 3 novos de ícone + 32 UI (por arquivo, com reexecução isolada das instabilidades conhecidas do Tk) aprovados; `compileall` e `git diff --check` OK.
+
+**Pendente:** os mesmos itens de DEC-114 (fechar as janelas dev, registrar a tarefa via Configurações → Concluir, primeira execução real, commit). Se algum atalho ainda mostrar o ícone antigo, é cache do Explorer: reiniciar o Explorer ou a sessão do Windows resolve.

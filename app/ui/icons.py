@@ -6,10 +6,40 @@ os icones consistentes no executavel empacotado e em qualquer Windows.
 from __future__ import annotations
 
 import tkinter as tk
+from pathlib import Path
+
+from app import config
+
+# Mesmo arquivo usado no recurso de icone do .exe (PyInstaller `icon=`) e no
+# instalador (Inno Setup `SetupIconFile`) -- gerado por scripts/generate_app_icon.py.
+WINDOW_ICON_RELATIVE_PATH = "assets/gsus-auditoria.ico"
 
 
-def apply_window_icon(root: tk.Tk) -> None:
-    """Aplica a marca no titulo da janela sem depender de arquivo externo."""
+def window_icon_path() -> Path:
+    """Caminho do `.ico` multirresolucao da marca.
+
+    Resolvido contra a raiz do app (`config.get_app_root`, DEC-069): em dev e a
+    pasta do projeto; no executavel empacotado e a pasta do proprio `.exe`, para
+    onde o spec do PyInstaller copia `assets/gsus-auditoria.ico` (`datas`)."""
+    return config.resolve_app_path(WINDOW_ICON_RELATIVE_PATH)
+
+
+def apply_window_icon(root: tk.Tk) -> bool:
+    """Aplica a marca no titulo da janela e na barra de tarefas.
+
+    Prefere o mesmo `.ico` embutido no executavel e no instalador (cantos
+    arredondados, fundo transparente, todas as resolucoes de 16 a 256 px), para
+    que janela, barra de tarefas, atalho e Explorer mostrem o mesmo simbolo.
+    Se o arquivo nao existir ou o Tk desta plataforma nao aceitar `.ico`, cai no
+    desenho de 32 px em PhotoImage, que nao depende de arquivo externo.
+    Devolve True quando o `.ico` foi aplicado."""
+    icon_path = window_icon_path()
+    if icon_path.is_file():
+        try:
+            root.iconbitmap(default=str(icon_path))
+            return True
+        except tk.TclError:
+            pass
     image = tk.PhotoImage(width=32, height=32)
     image.put("#ffffff", to=(0, 0, 32, 32))
     image.put("#111315", to=(4, 4, 14, 14))
@@ -18,6 +48,7 @@ def apply_window_icon(root: tk.Tk) -> None:
     image.put("#ff4f0a", to=(18, 18, 28, 28))
     root.iconphoto(True, image)
     root._gsus_icon_image = image  # type: ignore[attr-defined] -- Tk exige referencia viva
+    return False
 
 
 def line_icon(

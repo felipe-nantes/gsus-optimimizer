@@ -280,6 +280,8 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  E2D0E140...08C5, instalado silenciosamente e verificado por hash contra o dist
                  testado; modelo GGUF movido para dentro da instalação. Tarefa agendada ainda
                  precisa ser registrada pelo usuário (Configurações → Concluir no build empacotado).
+                 REGENERADO (DEC-115, ícone na janela): mesmo 1.1.0, novo
+                 `GSUSAuditoria-Setup.exe` 120,0 MB, SHA-256 00A95DAE...1F71 -- substitui o de DEC-114.
 [x] E2E-001      Teste em máquina limpa (sem Python/Playwright/llama.cpp pré-instalados) --
                  marcado como não feito por muito tempo por engano: na prática, extensivamente
                  executado nesta máquina real desde 2026-08-26 (login headless, paginação de
@@ -578,6 +580,10 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  configuração e consulta. O censo permanece compacto e o restante continua
                  acessível por rolagem; em 1024×700, os gráficos viram automaticamente um
                  resumo textual legível e reaparecem ao ampliar a janela.
+                 ÍCONE 2026-09-04 (DEC-115): a janela Tk passou a usar o próprio
+                 `assets/gsus-auditoria.ico` (empacotado como dado ao lado do .exe), unificando
+                 título/barra de tarefas com .exe, atalho e instalador; PhotoImage vira fallback.
+                 +3 testes (`tests/unit/test_icons.py`). Instalador 1.1.0 regenerado e reinstalado.
 [x] REPORT-002   Relatório HTML alinhado à mesma referência visual (DEC-113): cartões arredondados,
                  hierarquia tipográfica, tabelas claras, tags e destaques laranja, responsivo
                  para telas menores. Prévia segura reproduzível em `scripts/preview_report.py`,

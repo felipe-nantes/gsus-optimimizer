@@ -2160,3 +2160,21 @@ Assimetria de risco deliberada: um falso positivo aqui (tratar um censo genuinam
 **Achado (registrado, não corrigido -- fora do escopo pedido, candidato a `DIAG-002`):** `app/analysis/run_diagnosis.py::classify_top_level_exception` devolve `FALHA_GSUS` para qualquer `playwright.sync_api.Error`, inclusive `BrowserType.launch: Executable doesn't exist` (navegador interno ausente) -- um problema de instalação/ambiente rotulado como "o GSUS não respondeu a tempo... não é defeito deste programa", que manda o auditor esperar em vez de acionar suporte. Proposta: antes do ramo Playwright, casar `"Executable doesn't exist"`/`"playwright install"` na mensagem e devolver `FALHA_INESPERADA` com texto do tipo "o navegador interno não foi encontrado na instalação -- reinstale o programa ou acione o suporte". Também continuam abertos os 5 achados da auditoria de código da sessão Codex (ordem cronológica das evoluções nas regras; paciente descartado por uma falha temporária do health-check da IA; run `COMPLETED` antes da fase de IA; pendências da mesma categoria fundidas; exceções do Playwright com conteúdo clínico em `logger.exception`).
 
 **Impacto:** `installer/gsus-auditoria.iss` (versão), `.gitignore` (`setup/`), `CURRENT_STATE.md`, `TASKS.md`. Instalação desta máquina atualizada para 1.1.0 com modelo presente. Nenhuma mudança de código de aplicação nesta decisão.
+
+---
+
+## DEC-115 — Janela Tk usa o mesmo `.ico` do executável e do instalador (empacotado como dado)
+
+**Pedido do usuário (2026-09-04):** trocar o ícone do executável e do produto pelo gerado pelo Codex.
+
+**Achado antes de mudar (não confiar na suposição):** o recurso de ícone do `.exe` instalado, do atalho e do `Setup.exe` já era o `.ico` do Codex -- extraídos e conferidos visualmente. A diferença visível estava na janela: `apply_window_icon` (DEC-113) desenhava um PhotoImage 32×32 de fundo branco, sem cantos arredondados nem transparência -- deliberadamente "sem depender de arquivo externo", mas visualmente diferente do símbolo do `.exe`, do atalho e do instalador. Segundo fator: após reinstalar sobre a mesma pasta, o Explorer pode continuar mostrando o ícone antigo dos atalhos por cache.
+
+**Decisão:**
+1. A janela aplica o próprio `.ico` (`root.iconbitmap(default=...)`, que no Windows cobre título, barra de tarefas e Alt-Tab com todas as resoluções do arquivo), resolvido por `config.resolve_app_path` (DEC-069) -- dev: `assets/` do projeto; frozen: `assets/` ao lado do `.exe`.
+2. O `.ico` vai no bundle também como dado (`datas=[(ICON_PATH, "assets")]` no spec), além de continuar como recurso do `.exe`. Custo: 11,8 KB.
+3. O PhotoImage continua como fallback (arquivo ausente ou Tk sem suporte a `.ico`); a função devolve `True`/`False` para dizer qual caminho foi usado.
+4. Cache do Explorer atualizado com `ie4uinit.exe -show` após a reinstalação; se ainda persistir, é cache local do Windows, não defeito do build.
+
+**Verificação:** `tests/unit/test_icons.py` (+3): resolução do caminho em dev e em modo frozen (monkeypatch de `sys.frozen`/`sys.executable`), e um único `tk.Tk()` que confirma `.ico` aplicado (Windows) e depois o fallback com o arquivo ausente -- a primeira versão do teste criava dois `tk.Tk()` no mesmo processo e falhou de forma intermitente (mesma instabilidade Tcl/Tk já documentada), por isso um Tk só. No `.exe` empacotado: `GetClassLongPtr(GCLP_HICON/GCLP_HICONSM)` da janela devolve o símbolo do Codex e a barra de título capturada por `PrintWindow` mostra fundo transparente e cantos arredondados (o `WM_GETICON` devolve nulo porque o Tk define o ícone na classe da janela, não na instância -- achado real ao verificar). Instalador regenerado, instalado e verificado por hash (CURRENT_STATE 2026-09-04, DEC-115).
+
+**Impacto:** `app/ui/icons.py`, `installer/gsus-auditoria.spec`, `tests/unit/test_icons.py`. Sem mudança de comportamento fora da apresentação.
