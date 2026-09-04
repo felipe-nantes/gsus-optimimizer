@@ -1169,3 +1169,33 @@ Proxima task: design/UX da tela (pedido explicito anterior do usuario) apos a en
 **Decisão do usuário após ver o relatório:** disparar mais uma execução real durante o dia (pra fechar cobertura + reconfirmar estabilidade) e **incluir o design/UX da tela nesta entrega** (revertendo o adiamento anterior -- agora que o resto está confirmado funcional, o usuário optou por investir tempo no visual antes de considerar entregue).
 
 **Próxima task:** design/UX da tela principal (Tkinter), com o restante do sistema já certificado.
+
+---
+
+## 2026-09-04 — Segunda passada de design/UX segura (DEC-112)
+
+**Pedido do usuário:** após instalar o executável, começar a melhorar o design sem quebrar nada.
+
+**Resultado:** as três telas foram refinadas no código-fonte. O painel principal agora tem cabeçalho operacional, status/setor/agendamento separados, quatro indicadores críticos em cartões e três complementares em uma faixa compacta. Isso corrige um defeito visual reproduzido na versão anterior: os sete cartões em linha ultrapassavam a janela e ficavam cortados. Os gráficos foram reorganizados para evitar sobreposição, e o censo ganhou contagem de resultados, busca clara, instrução de abertura e estado vazio. Configuração e consulta local agora seguem a mesma linguagem visual.
+
+**Segurança:** toda revisão visual foi feita com `scripts/preview_ui.py`, banco temporário e prontuários fictícios `DEMO-*`. A instalação, o banco real, credenciais e o GSUS não foram acessados.
+
+**Verificação:** 420 testes aprovados (331 unitários não visuais, 32 de UI em processos isolados e 57 de integração/E2E), além de compilação e checagem do diff. O detector de display dos testes Tk foi estabilizado para não criar uma janela extra antes de cada caso.
+
+**Estado de entrega:** código do novo visual pronto e validado. O executável instalado continua sendo a versão anterior; o instalador ainda precisa ser regenerado depois da aprovação visual.
+
+**Próxima task:** aprovação do visual pelo usuário; depois, atualizar versão, gerar e validar o novo instalador. O refinamento CSS do relatório HTML (`REPORT-002`) continua separado.
+
+---
+
+## 2026-09-04 — Visual alinhado à referência em todo o produto (DEC-113)
+
+**Resultado:** a referência enviada pelo usuário foi convertida numa linguagem visual consistente: fundo cinza suave, navegação lateral branca, cartões claros, textos escuros, ação primária laranja, item ativo com trilho laranja, ícones lineares próprios e marca em blocos preto/laranja. O padrão foi aplicado à dashboard, primeira conexão/configuração, consulta local e relatório HTML.
+
+**Revisão por captura:** as quatro prévias foram geradas com dados exclusivamente fictícios. A primeira imagem revelou sobreposição nos gráficos; a composição foi ajustada para uma faixa horizontal e a tabela passou a solicitar menos altura, sem perder acesso ao restante do censo por rolagem. Uma quinta verificação em 1024×700 levou à criação de um modo compacto automático: nessa altura os gráficos viram um resumo textual dos mesmos totais e a tabela continua mostrando uma linha; ao ampliar, os gráficos completos reaparecem. A prévia do relatório revelou estouro no texto "tempo indeterminado"; o cartão ganhou estilo compacto e foi fotografado novamente sem overflow.
+
+**Ícone:** `assets/gsus-auditoria.ico` está ligado à janela, ao executável e ao instalador. `scripts/generate_app_icon.py` permite regenerar o arquivo de forma determinística.
+
+**Verificação:** 420 testes aprovados (331 não visuais, 32 UI isolados e 57 integração/E2E), compilação e checagem de diff aprovadas. Nenhum acesso ao GSUS, banco real, credencial ou instalação durante as prévias.
+
+**Estado de entrega:** código e visual prontos para aprovação. O `setup/GSUSAuditoria-Setup.exe` fornecido pelo usuário continua intacto e contém o visual anterior; gerar uma nova versão do instalador é o próximo passo depois da aprovação das capturas.

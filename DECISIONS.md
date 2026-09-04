@@ -2096,3 +2096,46 @@ Assimetria de risco deliberada: um falso positivo aqui (tratar um censo genuinam
 **Verificação:** 19 testes novos de classificação pura (`tests/unit/test_run_diagnosis.py`, cobrindo cada categoria do catálogo + os casos ambíguos citados acima) + 4 testes e2e confirmando que `run_once` grava o diagnóstico certo nos três formatos de desfecho, incluindo o cenário antes invisível (censo falha por completo, `run_id=None`). Verificado visualmente com dado 100% sintético (nunca banco real). Suíte completa: 386 passed (3 rodadas seguidas, sem flakiness -- uma falha isolada de inicialização do Tcl/Tk nesta máquina durante uma rodada foi confirmada como ambiental/intermitente, não relacionada a este código).
 
 **Impacto:** `app/storage/database.py` (tabela `run_diagnostics`, aditiva), `app/storage/repository.py` (`save_run_diagnostic`/`get_latest_run_diagnostic`/`get_error_messages_for_run`), `app/analysis/run_diagnosis.py` (novo), `app/orchestrator.py`, `app/update_flow.py`, `app/ui/main_window.py`. Nenhuma mudança de comportamento do pipeline em si -- só observabilidade.
+
+---
+
+## DEC-112 — Segunda passada de design: hierarquia operacional, layout sem cortes e prévia segura reproduzível
+
+**Pedido do usuário (2026-09-04):** depois de instalar o primeiro executável, melhorar o design sem quebrar nenhum fluxo existente.
+
+**Achado visual reproduzido antes da alteração:** os 7 cartões de KPI em uma única linha ultrapassavam a largura útil da janela; indicadores à direita ficavam cortados. Os 4 gráficos em uma grade 2×2 também recebiam pouca altura quando a tabela de censo estava visível, fazendo rótulos se sobreporem em monitores menores.
+
+**Decisão:** preservar todos os atributos e comandos usados pelo comportamento existente (`status_label`, `update_button`, `_kpi_labels`, `_census_tree`, atualização, relatórios e consulta), alterando apenas apresentação e informação auxiliar:
+- cabeçalho em cartão, com ação principal destacada, status, setor e próximo horário em uma faixa própria;
+- 4 KPIs críticos em cartões e 3 indicadores complementares numa faixa compacta, evitando qualquer overflow horizontal;
+- gráficos reorganizados com categoria ocupando a altura inteira e prioridade/origem em barras compactas; nomes técnicos da taxonomia são apresentados em português amigável, sem alterar os valores persistidos;
+- censo ganhou título, total de resultados, instrução de duplo clique, busca mais clara e estado vazio;
+- configuração e consulta local passaram a usar cartões, campos empilhados, hierarquia tipográfica e mensagens de segurança consistentes;
+- tamanho inicial da dashboard passou a respeitar a área disponível da tela, mantendo o mínimo já testado de 1024×700.
+
+**Segurança da verificação visual:** criado `scripts/preview_ui.py`, que sempre aponta `GSUS_AUDITORIA_DATA_DIR` para uma pasta temporária, popula somente prontuários `DEMO-*`, fotografa a janela pelo identificador nativo e apaga o banco temporário ao terminar. Ele permite revisar as três telas sem ler a instalação nem o banco real.
+
+**Confiabilidade dos testes Tk:** os quatro módulos de UI criavam um `tk.Tk()` extra apenas para detectar disponibilidade e depois outro dentro do teste, padrão intermitente neste Windows/Tcl. A detecção agora consulta plataforma/display sem instanciar Tk; os 32 casos visuais foram executados em processos isolados, um interpretador por caso.
+
+**Verificação:** 331 testes unitários não visuais + 32 testes de UI + 57 testes de integração/E2E = **420 aprovados**. As 10 integrações que antes não iniciavam por ausência de Chromium também foram executadas após instalar o navegador exclusivamente em `playwright-browsers/` (ignorado pelo Git). `compileall` e `git diff --check` aprovados. Nenhum acesso ao GSUS, nenhuma credencial e nenhum dado real usados.
+
+**Impacto:** `app/ui/main_window.py`, `app/ui/setup_window.py`, `app/ui/lookup_window.py`, `scripts/preview_ui.py` e estabilização do detector de display nos testes de UI. Nenhuma mudança de schema, regra clínica, persistência, automação ou integração com o GSUS. O instalador ainda não foi regenerado nesta decisão.
+
+---
+
+## DEC-113 — Linguagem visual inspirada na referência: navegação, ícones, conexão e relatório
+
+**Pedido do usuário (2026-09-04):** usar uma imagem de dashboard como base para identificar padrões e aplicá-los em todo o projeto, incluindo ícones e tela de login, entregando capturas do resultado.
+
+**Padrões extraídos:** canvas cinza suave; painel principal quase branco; navegação lateral branca; tipografia escura com textos auxiliares discretos; laranja como ação/destaque; cartões brancos com contorno leve; ícones lineares monocromáticos; item ativo marcado por uma barra laranja; informações densas organizadas em métricas, gráficos e tabelas, sem decoração que prejudique leitura operacional. A referência foi tratada como linguagem visual, não como cópia literal.
+
+**Aplicação:**
+- dashboard com navegação lateral, ação primária laranja, cartões de indicadores e gráficos compactos; a tabela passou a pedir uma altura menor, mantendo o censo completo por rolagem. Em 1024×700, a área gráfica troca automaticamente para um resumo textual dos mesmos totais e retorna aos gráficos completos quando há altura suficiente;
+- primeira conexão/configuração e busca de paciente com a mesma navegação, hierarquia, ícones e cartões;
+- novo conjunto de ícones desenhados em Tkinter (`app/ui/icons.py`), sem fonte ou serviço externo, e marca em blocos preto/laranja;
+- ícone `.ico` multirresolução gerado em `assets/gsus-auditoria.ico`, usado na janela, no executável PyInstaller e no instalador Inno Setup;
+- CSS do relatório HTML reformulado com a mesma paleta, cartões, tabelas, tags, destaques e adaptação para telas menores (`REPORT-002`).
+
+**Segurança e verificação:** `scripts/preview_ui.py` e `scripts/preview_report.py` usam exclusivamente pasta temporária e prontuários `DEMO-*`; nenhum dado, credencial, instalação ou acesso ao GSUS real participa das capturas. Revisão visual feita nas três telas, no relatório e também no tamanho mínimo 1024×700; um problema de sobreposição nos gráficos e um texto longo fora do cartão do relatório foram encontrados pelas imagens e corrigidos. Suíte completa preservada: **420 testes aprovados** (331 não visuais + 32 UI em processos isolados + 57 integração/E2E), além de `compileall` e `git diff --check`.
+
+**Impacto:** apresentação e ativos visuais apenas. Nenhuma mudança em schema, regra clínica, persistência, automação ou integração. O código-fonte está pronto; o instalador presente em `setup/` continua sendo a versão anterior e não foi sobrescrito.

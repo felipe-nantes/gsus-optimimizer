@@ -542,7 +542,7 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  paciente (2026-09-03) -- adiado explicitamente desde 2026-09-01 ("resto
                  funcional primeiro"), incluído nesta entrega por decisão do usuário após a
                  auditoria de prontidão confirmar que o resto do sistema já estava sólido.
-                 Paleta única (azul de marca + as MESMAS cores de prioridade já usadas no
+                 Paleta única (cor de marca + as MESMAS cores de prioridade já usadas no
                  relatório HTML, PRIORITY_COLORS -- nunca reinterpretadas), tipografia
                  consistente (Segoe UI), cartões de KPI com faixa de destaque colorida no
                  topo, botões ttk customizados (tema `clam`, único que respeita cor
@@ -559,8 +559,22 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  Testes: 362 passed (mesma suíte, +correção de 2 testes de detecção de
                  botão). Verificado visualmente com dados 100% sintéticos (nunca banco real)
                  nas 3 telas.
-[ ] REPORT-002   Refinamentos visuais do relatório (CSS) -- fora de escopo desta rodada
-                 (UI-005 cobriu só a tela Tkinter, não o relatório HTML)
+                 REFINADO 2026-09-04 (DEC-112): o primeiro layout colocava os 7 KPIs em uma
+                 linha e cortava os cartões à direita. Reorganizado em 4 cartões críticos +
+                 faixa de 3 indicadores complementares; cabeçalho/status, gráficos, censo,
+                 configuração e consulta local ganharam hierarquia e espaçamento consistentes.
+                 Novo `scripts/preview_ui.py` gera screenshots das 3 telas com banco temporário
+                 e prontuários DEMO-* (nunca toca dado real). Verificação: 420 testes aprovados.
+                 REFERÊNCIA VISUAL 2026-09-04 (DEC-113): fundo cinza suave, navegação lateral
+                 branca, cartões claros, tipografia escura, destaque laranja, ícones lineares
+                 próprios e novo símbolo do aplicativo aplicados ao painel, conexão inicial,
+                 configuração e consulta. O censo permanece compacto e o restante continua
+                 acessível por rolagem; em 1024×700, os gráficos viram automaticamente um
+                 resumo textual legível e reaparecem ao ampliar a janela.
+[x] REPORT-002   Relatório HTML alinhado à mesma referência visual (DEC-113): cartões arredondados,
+                 hierarquia tipográfica, tabelas claras, tags e destaques laranja, responsivo
+                 para telas menores. Prévia segura reproduzível em `scripts/preview_report.py`,
+                 sempre com banco temporário e dados DEMO-*.
 [x] DIAG-001     Diagnóstico de execução em linguagem simples (2026-09-03, pedido explícito
                  do usuário) -- o auditor (sem conhecimento técnico) precisa saber se uma
                  falha foi o GSUS/rede/máquina (não é defeito do programa) ou algo que precisa

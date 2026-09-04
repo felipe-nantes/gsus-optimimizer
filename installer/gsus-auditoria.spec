@@ -20,6 +20,7 @@ from PyInstaller.utils.hooks import collect_submodules
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(SPEC)), "..")
 RUNTIME_DIR = os.path.join(PROJECT_ROOT, "runtime")
 PLAYWRIGHT_BROWSERS_DIR = os.path.join(PROJECT_ROOT, "playwright-browsers")
+ICON_PATH = os.path.join(PROJECT_ROOT, "assets", "gsus-auditoria.ico")
 
 # REPORT-004/DEC-099 (matplotlib, 1ª dependência "pesada" do projeto):
 # achado real de build -- o hook oficial do PyInstaller pra numpy não
@@ -65,6 +66,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
+    icon=ICON_PATH,
     codesign_identity=None,
     entitlements_file=None,
     # PyInstaller 6.x por padrão põe tudo (exceto o .exe) numa subpasta
