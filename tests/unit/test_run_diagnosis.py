@@ -205,3 +205,12 @@ def test_stale_diagnostic_triggers_warning_attributing_to_scheduler_not_bug():
     assert warning is not None
     assert "desligado ou hibernando" in warning
     assert "não um defeito deste programa" in warning
+
+
+# ------------------------------------------------------- describe_cancelled_run (UI-006)
+def test_cancelled_run_is_described_as_user_action_not_failure():
+    outcome, summary, needs_attention = run_diagnosis.describe_cancelled_run(found=80, completed=3)
+    assert outcome == run_diagnosis.OUTCOME_CANCELADA
+    assert needs_attention is False
+    assert "3 de 80" in summary
+    assert "encerrada pelo usuário" in summary.lower()

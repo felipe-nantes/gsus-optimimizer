@@ -27,9 +27,15 @@ CONTENT_FRAME_NAME = "content"
 class GSUSClient:
     """Gerencia uma sessão de browser para um ciclo de execução."""
 
-    def __init__(self, base_url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS):
+    def __init__(self, base_url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS, headless: bool = False):
         self.base_url = base_url
         self.timeout_ms = timeout_ms
+        # UI-006 (2026-09-04): `headless` vem do interruptor "Navegador
+        # visível / Segundo plano" da tela principal (`AppConfig.browser_visible`).
+        # Padrão False = janela visível, o único modo comprovado contra o GSUS
+        # real (ver comentário em `__enter__`, DEC-077). `headless=True` é
+        # opt-in explícito do usuário e fica registrado no log da sessão.
+        self.headless = headless
         self._playwright = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
@@ -51,11 +57,13 @@ class GSUSClient:
         # vs Chromium) -- escolher o caminho simples já comprovado
         # funcionando, não tentar mascarar o sinal de automação em modo
         # headless (mais frágil, não testado, incerto se resolveria).
-        self._browser = self._playwright.firefox.launch(headless=False)
+        # UI-006: `self.headless` só é True quando o usuário escolheu "Segundo
+        # plano" na tela principal -- o padrão continua sendo a janela visível.
+        self._browser = self._playwright.firefox.launch(headless=self.headless)
         self._context = self._browser.new_context()
         self._context.set_default_timeout(self.timeout_ms)
         self.page = self._context.new_page()
-        logger.info("Sessão GSUS iniciada (base_url=%s)", self.base_url)
+        logger.info("Sessão GSUS iniciada (base_url=%s, headless=%s)", self.base_url, self.headless)
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

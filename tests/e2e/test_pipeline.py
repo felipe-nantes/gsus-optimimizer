@@ -787,3 +787,112 @@ def test_unexpected_per_patient_error_type_flags_diagnostic_for_investigation(tm
     assert diagnostic["outcome"] == run_diagnosis.OUTCOME_FALHA_INESPERADA
     assert diagnostic["needs_attention"]
     conn.close()
+
+
+# ------------------------------------------------------------ UI-006 (Encerrar)
+
+class CancelDuringFirstPatientRecordSource(FixtureRecordSource):
+    """Simula o auditor clicando "Encerrar" enquanto o 1o paciente ainda esta
+    sendo coletado: seta o evento DURANTE a extracao -- o paciente atual
+    precisa terminar inteiro e o laco parar ANTES do proximo."""
+
+    def __init__(self, fixture_by_record_number, cancel_event):
+        super().__init__(fixture_by_record_number)
+        self.cancel_event = cancel_event
+        self.calls = 0
+
+    def get_raw_notes_text(self, patient: Patient, known_days=frozenset()) -> str:
+        self.calls += 1
+        self.cancel_event.set()
+        return super().get_raw_notes_text(patient, known_days)
+
+
+class StoppableStubLLM(StubLLM):
+    """StubLLM com `stop()` observavel -- `run_once` deve derrubar a IA na hora
+    quando o usuario encerra, em vez de esperar a analise atual terminar."""
+
+    def __init__(self):
+        self.stopped = False
+        self.analyze_calls = 0
+
+    def analyze_patient(self, previous_state, new_notes, active_pending_items=None):
+        self.analyze_calls += 1
+        return super().analyze_patient(previous_state, new_notes, active_pending_items)
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_pipeline_cancel_event_stops_after_current_patient_and_marks_run_cancelled(tmp_path):
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    cancel_event = threading.Event()
+    patients = _patients() + [Patient(record_number="300", bed="2C", unit=UNIT)]
+    records = CancelDuringFirstPatientRecordSource(
+        {"100": "awaiting_exam.txt", "200": "resolved_consult.txt", "300": "awaiting_exam.txt"},
+        cancel_event,
+    )
+    llm = StoppableStubLLM()
+    report_path = tmp_path / "relatorio.html"
+
+    result = run_once(
+        repo, FixtureCensusSource(patients), records, UNIT, report_path, llm=llm, cancel_event=cancel_event,
+    )
+
+    assert result.status == "CANCELLED"
+    assert records.calls == 1  # so o paciente em andamento terminou; o proximo nem comecou
+    assert result.counts["found"] == 3
+    assert result.counts["completed"] == 1
+    assert result.counts["failed"] == 0
+    run_row = conn.execute("SELECT status FROM runs WHERE run_id = ?", (result.run_id,)).fetchone()
+    assert run_row["status"] == "CANCELLED"
+    pending = conn.execute(
+        "SELECT COUNT(*) AS n FROM processing_queue WHERE run_id = ? AND status = 'PENDING'",
+        (result.run_id,),
+    ).fetchone()["n"]
+    assert pending == 2  # os dois restantes continuam PENDING, nunca ERROR
+    assert llm.stopped is True  # analise em andamento derrubada na hora
+    assert llm.analyze_calls == 0  # fila da IA descartada, nada marcado como analisado
+    assert not report_path.exists()  # relatorio do dia NAO e regravado com fatia parcial
+    assert conn.execute("SELECT COUNT(*) AS n FROM daily_snapshot").fetchone()["n"] == 0
+    diagnostic = repo.get_latest_run_diagnostic()
+    assert diagnostic["outcome"] == run_diagnosis.OUTCOME_CANCELADA
+    assert not diagnostic["needs_attention"]
+    assert "1 de 3" in diagnostic["summary"]
+    assert not any(t.name == "llm-phase2-worker" and t.is_alive() for t in threading.enumerate())
+    conn.close()
+
+
+def test_pipeline_cancel_before_start_never_touches_the_census(tmp_path):
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    class ExplodingCensusSource:
+        def get_census(self) -> list[Patient]:
+            raise AssertionError("o censo nao deveria ser consultado depois de encerrar")
+
+    result = run_once(
+        repo, ExplodingCensusSource(), FixtureRecordSource({}), UNIT, tmp_path / "relatorio.html",
+        cancel_event=cancel_event,
+    )
+
+    assert result.status == "CANCELLED"
+    assert result.counts == {"found": 0, "completed": 0, "failed": 0, "no_admission": 0}
+    assert conn.execute("SELECT COUNT(*) AS n FROM runs").fetchone()["n"] == 0
+    conn.close()
+
+
+def test_pipeline_without_cancel_event_still_completes_normally(tmp_path):
+    """Regressao: quem nao passa `cancel_event` (execucao agendada, testes
+    antigos) continua com exatamente o comportamento anterior."""
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    records = FixtureRecordSource({"100": "awaiting_exam.txt", "200": "resolved_consult.txt"})
+
+    result = run_once(repo, FixtureCensusSource(_patients()), records, UNIT, tmp_path / "relatorio.html")
+
+    assert result.status == "COMPLETED"
+    assert result.counts["completed"] == 2
+    conn.close()

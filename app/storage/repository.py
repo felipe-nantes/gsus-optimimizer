@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 RUN_STATUS_RUNNING = "RUNNING"
 RUN_STATUS_COMPLETED = "COMPLETED"
 RUN_STATUS_FAILED = "FAILED"
+# UI-006 (2026-09-04): encerrada pelo usuário no meio (botão "Encerrar") --
+# Fase 1 parou entre um paciente e outro, nada ficou meio-gravado.
+RUN_STATUS_CANCELLED = "CANCELLED"
 
 QUEUE_PENDING = "PENDING"
 QUEUE_PROCESSING = "PROCESSING"

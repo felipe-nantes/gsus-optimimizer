@@ -97,6 +97,10 @@ class RunResult:
     run_id: str
     counts: dict
     report_path: Path
+    # UI-006 (2026-09-04): "COMPLETED" (rodou até o fim) ou "CANCELLED"
+    # (encerrada pelo usuário no meio, via `cancel_event`). Nunca "FAILED" --
+    # falha continua sendo exceção, não resultado.
+    status: str = "COMPLETED"
 
 
 def run_once(
@@ -108,11 +112,23 @@ def run_once(
     llm: AnalysisEngine | None = None,
     progress: ProgressCallback | None = None,
     raw_notes_retention_days: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> RunResult:
     def report(message: str) -> None:
         logger.info(message)
         if progress:
             progress(message)
+
+    # UI-006 (2026-09-04, botão "Encerrar"): cancelamento COOPERATIVO --
+    # checado só em pontos seguros (antes do censo e entre um paciente e
+    # outro na Fase 1; entre um item e outro na Fase 2). Nunca interrompe uma
+    # gravação no meio: cada paciente ou termina inteiro ou nem começa, e o
+    # que sobrou continua PENDING pra próxima execução retomar sozinha.
+    def cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
+    def empty_counts() -> dict:
+        return {"found": 0, "completed": 0, "failed": 0, "no_admission": 0}
 
     # Achado real (auditoria de resiliência 2026-08-28): antes desta trava,
     # qualquer exceção não prevista escapando desta função (falha de
@@ -126,6 +142,14 @@ def run_once(
     try:
         report("Preparando...")
         repo.resume_incomplete_runs()
+
+        if cancelled():
+            # Encerrado enquanto ainda carregava o modelo/abria o navegador --
+            # não há run nem censo; sai antes de tocar o GSUS.
+            report("Encerrado pelo usuário antes de acessar o GSUS.")
+            return RunResult(
+                run_id="", counts=empty_counts(), report_path=report_output_path, status="CANCELLED",
+            )
 
         report("Acessando GSUS...")
         report("Obtendo pacientes...")
@@ -205,10 +229,15 @@ def run_once(
         # esta variável pra decidir o que enfileirar antes de encerrar a
         # thread.
         backlog_tasks: list[tuple[str, list[StructuredNote], bool]] = []
+        # UI-006: vira True quando o usuário clica "Encerrar" no meio da Fase 1.
+        run_cancelled = False
         if llm is not None:
             llm_worker_thread = threading.Thread(
                 target=_llm_phase2_worker,
-                args=(_get_db_path(repo), run_id, unit, report_output_path, llm, llm_queue, report, worker_failed),
+                args=(
+                    _get_db_path(repo), run_id, unit, report_output_path, llm, llm_queue, report, worker_failed,
+                    cancel_event,
+                ),
                 name="llm-phase2-worker",
                 daemon=True,
             )
@@ -228,6 +257,12 @@ def run_once(
         # sentinela+join sempre rodar, não importa por onde a função saia.
         try:
             while True:
+                if cancelled():
+                    # UI-006: o paciente anterior já terminou inteiro (gravado);
+                    # o próximo nem começa -- continua PENDING pra próxima execução.
+                    run_cancelled = True
+                    report("Encerrando: o paciente atual já foi concluído, parando a coleta...")
+                    break
                 # Achado real (auditoria de certificação pré-entrega, 2026-09-01,
                 # RESIL-011/DEC-105): confirmado no banco de PRODUÇÃO real -- várias runs
                 # tinham dezenas/centenas de pacientes presos em PENDING sem
@@ -284,8 +319,9 @@ def run_once(
                     logger.exception("Falha ao processar paciente %s", pseudonym.for_log(patient_id))
                     repo.mark_error(run_id, patient_id, _safe_error_text(exc))
 
+            final_status = "CANCELLED" if run_cancelled else "COMPLETED"
             try:
-                repo.finish_run(run_id, "COMPLETED")
+                repo.finish_run(run_id, final_status)
             except Exception:
                 # DEC-109 (revisão adversarial): achado real -- esta chamada
                 # ficava sem proteção, diferente de tudo ao redor. Antes da
@@ -299,16 +335,32 @@ def run_once(
                 logger.exception(
                     "Falha ao marcar run como COMPLETED -- Fase 1 já persistiu tudo, seguindo mesmo assim"
                 )
-            report("Gerando relatório (regras)...")
-            try:
-                generate_report(repo, run_id, unit, report_output_path)
-            except Exception:
-                # Achado real (auditoria de resiliência): esta chamada estava
-                # fora de qualquer try/except -- uma falha de ESCRITA aqui
-                # (disco cheio, permissão, etc.) abortava a execução inteira
-                # ANTES da Fase 2 (IA) sequer começar, mesmo com a Fase 1 já
-                # 100% concluída e persistida no banco.
-                logger.exception("Falha ao gerar relatório (fase de regras) -- Fase 2 (IA) segue mesmo assim")
+            if run_cancelled:
+                # UI-006: encerrado pelo usuário -- NÃO regrava o relatório do
+                # dia com uma fatia parcial (o anterior, completo, continua
+                # valendo), não enfileira backlog pra IA (abaixo) e derruba na
+                # hora a análise por IA que estiver em andamento: sem isto, o
+                # botão só responderia depois de a análise atual terminar (até
+                # minutos em CPU). A thread da Fase 2 trata a falha da chamada
+                # como qualquer outra (isolada por paciente) e, vendo o evento
+                # setado, descarta o resto da fila -- nada fica marcado como
+                # analisado sem ter terminado.
+                if llm is not None and hasattr(llm, "stop"):
+                    try:
+                        llm.stop()
+                    except Exception:
+                        logger.exception("Falha ao parar o LLM após encerramento pelo usuário")
+            else:
+                report("Gerando relatório (regras)...")
+                try:
+                    generate_report(repo, run_id, unit, report_output_path)
+                except Exception:
+                    # Achado real (auditoria de resiliência): esta chamada estava
+                    # fora de qualquer try/except -- uma falha de ESCRITA aqui
+                    # (disco cheio, permissão, etc.) abortava a execução inteira
+                    # ANTES da Fase 2 (IA) sequer começar, mesmo com a Fase 1 já
+                    # 100% concluída e persistida no banco.
+                    logger.exception("Falha ao gerar relatório (fase de regras) -- Fase 2 (IA) segue mesmo assim")
 
             # LLM-004 / DEC-090 (achado confirmado pela auditoria de
             # resiliência): o sinal de "nota nova" é consumido e destruído em
@@ -337,7 +389,8 @@ def run_once(
             # abaixo: ele SEMPRE roda antes da exceção continuar subindo,
             # então o sentinela/join da thread da Fase 2 nunca deixam de
             # acontecer só porque o backlog explodiu.
-            for pending_patient_id in repo.get_active_patients_pending_ai_analysis():
+            # UI-006: sem backlog quando encerrado pelo usuário.
+            for pending_patient_id in ([] if run_cancelled else repo.get_active_patients_pending_ai_analysis()):
                 if pending_patient_id in queued_patient_ids:
                     continue
                 backlog_notes = _reconstruct_all_notes(repo, pending_patient_id)
@@ -351,7 +404,10 @@ def run_once(
                 for task in backlog_tasks:
                     llm_queue.put(task)
                 llm_queue.put(_LLM_QUEUE_DONE)
-                report("Aguardando a análise por IA (já em andamento em paralelo desde a Fase 1) terminar a fila...")
+                if run_cancelled:
+                    report("Encerrando a análise por IA...")
+                else:
+                    report("Aguardando a análise por IA (já em andamento em paralelo desde a Fase 1) terminar a fila...")
                 # DEC-109 (revisão adversarial): `.join()` sem timeout algum
                 # já existia em espírito antes (Fase 2 sequencial tinha o
                 # mesmo teto de ~90min/paciente sem disjuntor eficaz contra um
@@ -380,10 +436,11 @@ def run_once(
         # mesmo motivo de `generate_report` acima: uma falha aqui (disco
         # cheio, etc.) não pode jogar fora uma execução que já persistiu
         # tudo o que importa em `patient_state`/`pending_items`.
-        try:
-            dashboard_metrics.save_snapshot(repo, run_id)
-        except Exception:
-            logger.exception("Falha ao gravar snapshot diário -- execução segue concluída mesmo assim")
+        if not run_cancelled:  # UI-006: retrato parcial do dia poluiria a tendência
+            try:
+                dashboard_metrics.save_snapshot(repo, run_id)
+            except Exception:
+                logger.exception("Falha ao gravar snapshot diário -- execução segue concluída mesmo assim")
 
         # DIAG-001 (2026-09-03, pedido do usuário): registra, em linguagem
         # simples, o que aconteceu nesta execução -- pra que o auditor (sem
@@ -394,17 +451,28 @@ def run_once(
         # pode derrubar uma execução que já terminou de verdade.
         try:
             final_counts = repo.get_run_counts(run_id)
-            outcome, summary, needs_attention = run_diagnosis.classify_completed_run(
-                found=final_counts["found"],
-                completed=final_counts["completed"],
-                no_admission=final_counts["no_admission"],
-                patient_errors=repo.get_error_messages_for_run(run_id),
-                census_complete=census_complete,
-            )
+            if run_cancelled:
+                outcome, summary, needs_attention = run_diagnosis.describe_cancelled_run(
+                    found=final_counts["found"], completed=final_counts["completed"],
+                )
+            else:
+                outcome, summary, needs_attention = run_diagnosis.classify_completed_run(
+                    found=final_counts["found"],
+                    completed=final_counts["completed"],
+                    no_admission=final_counts["no_admission"],
+                    patient_errors=repo.get_error_messages_for_run(run_id),
+                    census_complete=census_complete,
+                )
             repo.save_run_diagnostic(run_id, outcome, summary, needs_attention)
         except Exception:
             logger.exception("Falha ao registrar diagnóstico da execução -- execução segue concluída mesmo assim")
 
+        if run_cancelled:
+            report("Encerrado pelo usuário.")
+            return RunResult(
+                run_id=run_id, counts=repo.get_run_counts(run_id), report_path=report_output_path,
+                status="CANCELLED",
+            )
         report("Concluído.")
         return RunResult(run_id=run_id, counts=repo.get_run_counts(run_id), report_path=report_output_path)
     except Exception as exc:
@@ -452,6 +520,7 @@ def _llm_phase2_worker(
     llm_queue: "queue.Queue",
     report: ProgressCallback,
     worker_failed: threading.Event,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """Consome `llm_queue` numa thread dedicada, em paralelo com a Fase 1
     (DEC-109) -- achado real 2026-09-02: numa execução de 182 pacientes, o
@@ -507,6 +576,11 @@ def _llm_phase2_worker(
             item = llm_queue.get()
             if item is _LLM_QUEUE_DONE:
                 return
+            if cancel_event is not None and cancel_event.is_set():
+                # UI-006: encerrado pelo usuário -- descarta o resto da fila
+                # sem analisar (nada é marcado concluído; a próxima execução
+                # recoloca esses pacientes via backlog, DEC-090).
+                continue
             patient_id, llm_notes, window_limited = item
             # Mesmo disjuntor de saúde do llama-server já existente (achado
             # real, auditoria de resiliência + DEC-087) e o mesmo isolamento

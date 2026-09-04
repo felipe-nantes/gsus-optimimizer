@@ -14,7 +14,7 @@
 ;     máquina de trabalho -- exigir elevação impediria a própria instalação.
 
 #define MyAppName "GSUS Auditoria"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppExeName "gsus-auditoria.exe"
 #define SourceDir "dist\gsus-auditoria"
 

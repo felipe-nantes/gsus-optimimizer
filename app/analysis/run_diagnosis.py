@@ -30,6 +30,9 @@ OUTCOME_SUCESSO = "SUCESSO"
 OUTCOME_SUCESSO_PARCIAL_GSUS = "SUCESSO_PARCIAL_GSUS"
 OUTCOME_FALHA_GSUS = "FALHA_GSUS"
 OUTCOME_FALHA_INESPERADA = "FALHA_INESPERADA"
+# UI-006 (2026-09-04): o próprio auditor clicou "Encerrar" -- não é falha de
+# nada (nem do GSUS, nem deste programa), só uma execução parada no meio.
+OUTCOME_CANCELADA = "CANCELADA"
 
 # Acima desta fração de pacientes com erro (mesmo que todos de causa
 # conhecida), o resumo passa a sugerir conferência manual -- muita gente
@@ -183,6 +186,20 @@ def classify_completed_run(
         f"Execução concluída -- {completed} de {found} paciente(s) processado(s), {failed} "
         "com falha pontual (categorias já conhecidas de instabilidade do GSUS -- serão "
         "retomados automaticamente na próxima execução).",
+        False,
+    )
+
+
+def describe_cancelled_run(found: int, completed: int) -> tuple[str, str, bool]:
+    """UI-006: execução interrompida pelo próprio auditor (botão "Encerrar").
+    Não é falha do GSUS nem deste programa -- só registra, em linguagem
+    simples, até onde a execução chegou. Nunca pede atenção: cada paciente
+    já processado ficou salvo e a próxima atualização retoma o restante."""
+    return (
+        OUTCOME_CANCELADA,
+        f"Execução encerrada pelo usuário -- {completed} de {found} paciente(s) processado(s) "
+        "antes da interrupção. Nada foi perdido: o que já foi processado está salvo e a "
+        "próxima atualização (manual ou agendada) continua de onde parou.",
         False,
     )
 

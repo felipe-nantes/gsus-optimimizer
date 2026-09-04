@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import msvcrt
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -74,6 +75,7 @@ def run_update(
     app_config: config.AppConfig,
     report_path: Path,
     progress: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> RunResult:
     """Roda uma atualização completa de verdade (censo -> regras -> IA ->
     relatório) contra o GSUS e o LLM reais. Levanta a exceção original em
@@ -83,14 +85,20 @@ def run_update(
     Levanta `UpdateAlreadyRunningError` de cara se outra atualização (clique
     manual OU execução automática) já estiver em andamento nesta máquina --
     nunca deixa duas tentarem usar o mesmo GSUS/LLM/banco ao mesmo tempo
-    (DEC-086)."""
+    (DEC-086).
+
+    `cancel_event` (UI-006, botão "Encerrar"): quando setado, a execução para
+    de forma cooperativa entre um paciente e outro (nunca no meio de uma
+    gravação), derruba a análise por IA em andamento e devolve um `RunResult`
+    com `status="CANCELLED"` em vez de levantar. A execução agendada
+    (`--auto-update`) não passa evento nenhum."""
     lock = _InstanceLock(config.get_app_data_dir() / LOCK_FILENAME)
     if not lock.acquire():
         raise UpdateAlreadyRunningError(
             "Já existe uma atualização em andamento nesta máquina (clique manual ou tarefa agendada)."
         )
     try:
-        return _run_update_locked(app_config, report_path, progress)
+        return _run_update_locked(app_config, report_path, progress, cancel_event)
     finally:
         lock.release()
 
@@ -99,6 +107,7 @@ def _run_update_locked(
     app_config: config.AppConfig,
     report_path: Path,
     progress: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> RunResult:
     """Corpo real de `run_update` -- só roda com o lock de instância única
     já garantido pelo chamador."""
@@ -175,7 +184,11 @@ def _run_update_locked(
     # levantasse (censo/login sem retry, erro inesperado), a conexão SQLite
     # nunca era fechada, vazando um handle a cada execução que falhasse.
     try:
-        with GSUSClient(app_config.gsus_base_url) as client:
+        # UI-006: "Navegador visível" (padrão, único modo comprovado contra o
+        # GSUS real -- DEC-077) x "Segundo plano" (headless), escolhido na tela
+        # principal e persistido em config.json -- vale também pra execução
+        # agendada, que passa por este mesmo caminho.
+        with GSUSClient(app_config.gsus_base_url, headless=not app_config.browser_visible) as client:
             client.goto()
             adapter = GSUSAdapter(
                 client.page, username, password, app_config.unit,
@@ -190,6 +203,7 @@ def _run_update_locked(
                 llm=llm,
                 progress=report,
                 raw_notes_retention_days=app_config.raw_notes_retention_days,
+                cancel_event=cancel_event,
             )
     except Exception as exc:
         # DIAG-001: cobre os poucos caminhos que ainda rodam FORA de

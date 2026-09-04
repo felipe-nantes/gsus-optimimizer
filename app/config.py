@@ -119,6 +119,14 @@ class AppConfig:
     # dela). `None` (padrão) mantém o comportamento normal, sem limite --
     # ver app/gsus/records.py::extract_notes/_days_beyond_cap.
     max_days_per_patient: int | None = None
+    # UI-006 (2026-09-04, pedido do usuário): interruptor "Navegador visível"
+    # x "Segundo plano" na tela principal. True (padrão) = Firefox aberto na
+    # tela durante a atualização, único modo comprovado contra o GSUS real
+    # (DEC-077: o login travava 100% em headless numa máquina limpa). False =
+    # `headless=True` no Playwright -- o Firefox não aparece. Persistido aqui
+    # pra valer também na execução agendada (`--auto-update`). Configs antigas
+    # sem a chave carregam o padrão (`from_dict` ignora chave ausente).
+    browser_visible: bool = True
     configured: bool = False
 
     def to_dict(self) -> dict:

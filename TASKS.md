@@ -282,6 +282,8 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  precisa ser registrada pelo usuário (Configurações → Concluir no build empacotado).
                  REGENERADO (DEC-115, ícone na janela): mesmo 1.1.0, novo
                  `GSUSAuditoria-Setup.exe` 120,0 MB, SHA-256 00A95DAE...1F71 -- substitui o de DEC-114.
+                 REGENERADO 1.2.0 (DEC-116, Encerrar + navegador visível/segundo plano): novo
+                 `GSUSAuditoria-Setup.exe` 120,0 MB, SHA-256 2CB17C12...9718 -- substitui o de DEC-115.
 [x] E2E-001      Teste em máquina limpa (sem Python/Playwright/llama.cpp pré-instalados) --
                  marcado como não feito por muito tempo por engano: na prática, extensivamente
                  executado nesta máquina real desde 2026-08-26 (login headless, paginação de
@@ -584,6 +586,17 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  `assets/gsus-auditoria.ico` (empacotado como dado ao lado do .exe), unificando
                  título/barra de tarefas com .exe, atalho e instalador; PhotoImage vira fallback.
                  +3 testes (`tests/unit/test_icons.py`). Instalador 1.1.0 regenerado e reinstalado.
+[x] UI-006       Botão "ENCERRAR" a auditoria em andamento (2026-09-04, pedido do usuário, DEC-116):
+                 cancelamento cooperativo via `cancel_event` (antes do censo, entre pacientes na
+                 Fase 1, entre itens na Fase 2; IA em andamento derrubada na hora). Run `CANCELLED`,
+                 diagnóstico `CANCELADA` neutro, sem relatório parcial nem snapshot. +8 testes.
+                 Melhoria possível (não bloqueadora): cancelar também entre dias dentro de
+                 `records.extract_notes` para responder em segundos.
+[x] UI-007       Interruptor "Navegador visível" / "Segundo plano" (2026-09-04, DEC-116):
+                 `AppConfig.browser_visible` persistido em config.json (vale na tarefa agendada),
+                 `GSUSClient(headless=...)`, `ToggleSwitch` em Canvas na barra de status. Padrão
+                 visível (DEC-077). PENDENTE: validação REAL do modo segundo plano pelo usuário --
+                 o GSUS já bloqueou navegador oculto antes; a tela sugere voltar se falhar.
 [x] REPORT-002   Relatório HTML alinhado à mesma referência visual (DEC-113): cartões arredondados,
                  hierarquia tipográfica, tabelas claras, tags e destaques laranja, responsivo
                  para telas menores. Prévia segura reproduzível em `scripts/preview_report.py`,

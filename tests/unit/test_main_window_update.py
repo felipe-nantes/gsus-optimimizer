@@ -42,9 +42,13 @@ def _pump_until_done(root: tk.Tk, window: MainWindow, timeout: float = 5.0) -> N
 
 
 class FakeClient:
-    def __init__(self, base_url):
+    # UI-006: registra o `headless` que a tela pediu em cada abertura de sessão.
+    launched_headless: list[bool] = []
+
+    def __init__(self, base_url, **kwargs):
         self.page = object()
         self.base_url = base_url
+        FakeClient.launched_headless.append(bool(kwargs.get("headless", False)))
 
     def __enter__(self):
         return self
@@ -260,5 +264,151 @@ def test_update_flow_maps_not_implemented_error_to_friendly_message(tmp_path, mo
         assert "NotImplementedError" not in status_text
         assert "BLOCKED_GSUS" not in status_text
         assert "desenvolvimento" in status_text.lower()
+    finally:
+        root.destroy()
+
+
+# ------------------------------------------------------------ UI-006
+
+class FakeAdapterSlowThreePatients:
+    """Tres pacientes, cada extracao leva ~0,3 s -- tempo suficiente pro teste
+    clicar "Encerrar" no meio do 1o paciente."""
+
+    def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None):
+        pass
+
+    def get_census(self):
+        return [Patient(record_number=r, bed="2A", unit="Clínica Médica") for r in ("100", "200", "300")]
+
+    def get_raw_notes_text(self, patient, known_days=frozenset()):
+        time.sleep(0.3)
+        return "20/08/2026 08:00 - Clinica Medica - Evolucao\nPaciente estavel, sem pendencias."
+
+
+def _cfg_without_llm() -> config.AppConfig:
+    return config.AppConfig(
+        gsus_username="11122233344",
+        unit="Clínica Médica",
+        configured=True,
+        model_path="nao-existe/model.gguf",
+        llm_server_path="nao-existe/llama-server.exe",
+    )
+
+
+def test_cancel_button_stops_update_after_current_patient(tmp_path, monkeypatch):
+    from app.gsus import adapter as gsus_adapter_module
+    from app.gsus import client as gsus_client_module
+
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(credentials, "get_credential", lambda name: ("11122233344", "senha"))
+    monkeypatch.setattr(gsus_client_module, "GSUSClient", FakeClient)
+    monkeypatch.setattr(gsus_adapter_module, "GSUSAdapter", FakeAdapterSlowThreePatients)
+
+    root = tk.Tk()
+    try:
+        window = MainWindow(root, _cfg_without_llm())
+        assert str(window.cancel_button["state"]) == "disabled"  # nada rodando: apagado
+        assert window.browser_switch.is_enabled() is True
+
+        window._on_update()
+        assert str(window.cancel_button["state"]) == "normal"
+        assert window.browser_switch.is_enabled() is False  # escolha so vale na proxima
+
+        deadline = time.monotonic() + 5
+        while "Processando paciente 1 de 3" not in window.status_label["text"] and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.02)
+        assert "Processando paciente 1 de 3" in window.status_label["text"]
+
+        window._on_cancel_update()
+        assert "Encerrando" in window.status_label["text"]
+        assert str(window.cancel_button["state"]) == "disabled"  # clique unico
+
+        _pump_until_done(root, window, timeout=10)
+
+        status_text = window.status_label["text"]
+        assert "Interrompida pelo usuário" in status_text
+        assert "/3 pacientes" in status_text
+        assert "3/3" not in status_text  # parou antes de terminar todo mundo
+        assert str(window.update_button["state"]) == "normal"
+        assert str(window.cancel_button["state"]) == "disabled"
+        assert window.browser_switch.is_enabled() is True
+        assert not window._report_path.exists()  # relatorio parcial nunca e gravado
+    finally:
+        root.destroy()
+
+
+def test_browser_mode_switch_persists_and_drives_headless(tmp_path, monkeypatch):
+    import json
+
+    from app.gsus import adapter as gsus_adapter_module
+    from app.gsus import client as gsus_client_module
+
+    FakeClient.launched_headless = []
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(credentials, "get_credential", lambda name: ("11122233344", "senha"))
+    monkeypatch.setattr(gsus_client_module, "GSUSClient", FakeClient)
+    monkeypatch.setattr(gsus_adapter_module, "GSUSAdapter", FakeAdapterOk)
+
+    cfg = _cfg_without_llm()
+    root = tk.Tk()
+    try:
+        window = MainWindow(root, cfg)
+        assert window.browser_switch.get() is True  # padrao: navegador visivel (DEC-077)
+        assert "Navegador visível" in window._browser_mode_label["text"]
+
+        window.browser_switch.toggle()  # -> segundo plano
+        assert cfg.browser_visible is False
+        saved = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        assert saved["browser_visible"] is False  # persistido na hora (vale pra tarefa agendada)
+        assert "Segundo plano" in window._browser_mode_label["text"]
+
+        window._on_update()
+        _pump_until_done(root, window)
+        assert "Atualizado" in window.status_label["text"]
+        assert FakeClient.launched_headless == [True]
+
+        window.browser_switch.toggle()  # -> visivel de novo
+        assert cfg.browser_visible is True
+        window._on_update()
+        _pump_until_done(root, window)
+        assert FakeClient.launched_headless == [True, False]
+    finally:
+        root.destroy()
+
+
+def test_error_in_background_mode_adds_hint_to_switch_back(tmp_path, monkeypatch):
+    """DEC-077: o GSUS ja bloqueou navegador oculto antes -- quando uma
+    atualizacao em segundo plano falha, a dica mais provavel precisa
+    aparecer na tela, nao so a mensagem generica."""
+    from app.gsus import adapter as gsus_adapter_module
+    from app.gsus import client as gsus_client_module
+
+    class FakeAdapterLoginFails:
+        def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None):
+            pass
+
+        def get_census(self):
+            from app.gsus.login import GSUSLoginError
+            raise GSUSLoginError("simulado: pop-up de login nao abriu")
+
+        def get_raw_notes_text(self, patient, known_days=frozenset()):
+            raise AssertionError("nao deveria ser chamado")
+
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(credentials, "get_credential", lambda name: ("11122233344", "senha"))
+    monkeypatch.setattr(gsus_client_module, "GSUSClient", FakeClient)
+    monkeypatch.setattr(gsus_adapter_module, "GSUSAdapter", FakeAdapterLoginFails)
+
+    cfg = _cfg_without_llm()
+    cfg.browser_visible = False
+    root = tk.Tk()
+    try:
+        window = MainWindow(root, cfg)
+        window._on_update()
+        _pump_until_done(root, window)
+        status_text = window.status_label["text"]
+        assert "Navegador visível" in status_text
+        assert "Traceback" not in status_text
     finally:
         root.destroy()

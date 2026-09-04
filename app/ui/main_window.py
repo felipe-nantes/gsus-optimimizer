@@ -38,6 +38,7 @@ from app.reports.html_report import PatientLookupResult, generate_patient_report
 from app.storage import database
 from app.storage.repository import Repository
 from app.ui.icons import icon_badge, line_icon, logo_mark
+from app.ui.widgets import ToggleSwitch
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ DIAGNOSTIC_COLORS = {
     run_diagnosis.OUTCOME_SUCESSO_PARCIAL_GSUS: ("#fdf3e3", "#8a5a00"),
     run_diagnosis.OUTCOME_FALHA_GSUS: ("#fdf3e3", "#8a5a00"),
     run_diagnosis.OUTCOME_FALHA_INESPERADA: ("#fbeae9", "#9c2b23"),
+    run_diagnosis.OUTCOME_CANCELADA: ("#eef0f3", "#3f4650"),  # UI-006: neutro, não é falha
 }
 DIAGNOSTIC_ATTENTION_COLORS = ("#fbeae9", "#9c2b23")
 
@@ -200,6 +202,17 @@ def configure_app_style() -> None:
         "Quiet.TButton",
         background=[("active", BRAND_SOFT)], foreground=[("active", TEXT_PRIMARY)],
     )
+    # UI-006: "ENCERRAR" -- contorno igual ao Secondary, texto na cor de
+    # gravidade ALTA (mesma do relatório); apagado quando não há atualização.
+    style.configure(
+        "Danger.TButton", background=CARD_BG, foreground=PRIORITY_COLORS["ALTA"],
+        font=(FONT_FAMILY, 9, "bold"), padding=(13, 8), borderwidth=1, relief="solid",
+    )
+    style.map(
+        "Danger.TButton",
+        background=[("active", "#fbeae9"), ("disabled", CARD_BG)],
+        foreground=[("disabled", "#c9c9cd")],
+    )
 
     style.configure(
         "Treeview", background=CARD_BG, fieldbackground=CARD_BG, foreground=TEXT_PRIMARY,
@@ -235,6 +248,8 @@ class MainWindow:
         self.on_lookup = on_lookup
         self._update_queue: queue.Queue = queue.Queue()
         self._updating = False
+        # UI-006: criado a cada "Atualizar agora"; "Encerrar" só o seta.
+        self._cancel_event: threading.Event | None = None
         self._report_path = config.get_app_data_dir() / "relatorio.html"
         self._census_report_path = config.get_app_data_dir() / "censo_relatorio.html"
 
@@ -390,12 +405,17 @@ class MainWindow:
             bar, text="ATUALIZAR AGORA", command=self._on_update, style="Primary.TButton",
         )
         self.update_button.grid(row=0, column=1, padx=(12, 6))
+        # UI-006: só habilitado enquanto uma atualização está em andamento.
+        self.cancel_button = ttk.Button(
+            bar, text="ENCERRAR", command=self._on_cancel_update, style="Danger.TButton", state="disabled",
+        )
+        self.cancel_button.grid(row=0, column=2, padx=(0, 6))
         ttk.Button(
             bar, text="ABRIR RELATÓRIO", command=self._on_open_report, style="Secondary.TButton",
-        ).grid(row=0, column=2)
+        ).grid(row=0, column=3)
 
         status_bar = tk.Frame(bar, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
-        status_bar.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        status_bar.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         status_bar.grid_columnconfigure(2, weight=1)
         tk.Label(
             status_bar, text="●", font=(FONT_FAMILY, 9), bg=CARD_BG, fg=SUCCESS_COLOR,
@@ -418,6 +438,35 @@ class MainWindow:
             status_bar, text=f"Próxima atualização  {self.app_config.schedule_time}",
             font=(FONT_FAMILY, 9), bg=CARD_BG, fg=TEXT_MUTED,
         ).grid(row=0, column=4, padx=(0, 18))
+
+        # UI-006: interruptor "Navegador visível" x "Segundo plano". Persistido
+        # em config.json no clique (vale também pra execução agendada);
+        # bloqueado durante uma atualização -- a escolha só vale na próxima.
+        self._browser_mode_label = tk.Label(
+            status_bar, text=self._browser_mode_text(), font=(FONT_FAMILY, 9),
+            bg=CARD_BG, fg=TEXT_MUTED,
+        )
+        self._browser_mode_label.grid(row=0, column=5, padx=(0, 7))
+        self.browser_switch = ToggleSwitch(
+            status_bar, value=self.app_config.browser_visible,
+            command=self._on_browser_mode_toggle, bg=CARD_BG,
+        )
+        self.browser_switch.grid(row=0, column=6, padx=(0, 16))
+
+    def _browser_mode_text(self) -> str:
+        return "Navegador visível" if self.app_config.browser_visible else "Segundo plano (Firefox oculto)"
+
+    def _on_browser_mode_toggle(self, visible: bool) -> None:
+        self.app_config.browser_visible = bool(visible)
+        try:
+            config.save_config(self.app_config)
+        except OSError:
+            logger.exception("Falha ao salvar a preferência navegador visível/segundo plano")
+        self._browser_mode_label.config(text=self._browser_mode_text())
+        logger.info(
+            "Modo do navegador nas atualizações: %s",
+            "navegador visível" if self.app_config.browser_visible else "segundo plano (headless)",
+        )
 
     def _build_diagnostic_banner(self, root: tk.Tk) -> None:
         """DIAG-001 (2026-09-03, pedido do usuário): mostra, em linguagem
@@ -458,6 +507,7 @@ class MainWindow:
             run_diagnosis.OUTCOME_SUCESSO_PARCIAL_GSUS: "Última execução (atenção do GSUS, não do programa): ",
             run_diagnosis.OUTCOME_FALHA_GSUS: "Última execução falhou (causa: GSUS/rede, não este programa): ",
             run_diagnosis.OUTCOME_FALHA_INESPERADA: "Última execução -- precisa de atenção: ",
+            run_diagnosis.OUTCOME_CANCELADA: "Última execução (encerrada por você): ",
         }.get(diagnostic["outcome"], "Última execução: ")
         self._diagnostic_banner.config(text=prefix + diagnostic["summary"], bg=bg, fg=fg)
         self._diagnostic_banner.grid()
@@ -680,12 +730,29 @@ class MainWindow:
         if self._updating:
             return
         self._updating = True
+        self._cancel_event = threading.Event()
         self.update_button.config(state="disabled")
+        self.cancel_button.config(state="normal")
+        self.browser_switch.set_enabled(False)
         self.status_label.config(text="Preparando...")
 
         thread = threading.Thread(target=self._run_update_worker, daemon=True)
         thread.start()
         self.root.after(150, self._poll_update_queue)
+
+    def _on_cancel_update(self) -> None:
+        """UI-006: encerramento cooperativo -- só seta o evento; quem para é
+        `run_once` (entre um paciente e outro) e a thread da Fase 2 (entre um
+        item e outro). Por isso o aviso: o paciente em coleta no instante do
+        clique ainda termina (segundos a ~1 min, dependendo do GSUS)."""
+        if not self._updating or self._cancel_event is None or self._cancel_event.is_set():
+            return
+        logger.info("Usuário solicitou encerrar a atualização em andamento")
+        self._cancel_event.set()
+        self.cancel_button.config(state="disabled")
+        self.status_label.config(
+            text="Encerrando... aguardando o paciente atual terminar (pode levar até um minuto)."
+        )
 
     def _run_update_worker(self) -> None:
         # Import tardio: evita custo de import do Playwright/orchestrator
@@ -698,6 +765,7 @@ class MainWindow:
                 self.app_config,
                 self._report_path,
                 progress=lambda msg: self._update_queue.put(("progress", msg)),
+                cancel_event=self._cancel_event,
             )
             self._update_queue.put(("done", result))
         except Exception as exc:
@@ -725,14 +793,25 @@ class MainWindow:
                     self.status_label.config(text=payload)
                 elif kind == "done":
                     counts = payload.counts
-                    self.status_label.config(
-                        text=f"Atualizado — {counts['completed']}/{counts['found']} pacientes "
-                        f"({counts['failed']} falha(s))"
-                    )
+                    if getattr(payload, "status", "COMPLETED") == "CANCELLED":
+                        self.status_label.config(
+                            text=f"Interrompida pelo usuário — {counts['completed']}/{counts['found']} pacientes "
+                            "processados nesta execução (o restante fica para a próxima)."
+                        )
+                    else:
+                        self.status_label.config(
+                            text=f"Atualizado — {counts['completed']}/{counts['found']} pacientes "
+                            f"({counts['failed']} falha(s))"
+                        )
                     self._finish_update()
                     return
                 elif kind == "error":
-                    self.status_label.config(text=payload)
+                    text = payload
+                    if not self.app_config.browser_visible:
+                        # UI-006/DEC-077: o GSUS já bloqueou navegador oculto
+                        # antes -- a dica mais provável vale mais que o genérico.
+                        text += ' Dica: a execução rodou em segundo plano; se o GSUS não abriu, ative "Navegador visível".'
+                    self.status_label.config(text=text)
                     self._finish_update()
                     return
         except queue.Empty:
@@ -743,7 +822,10 @@ class MainWindow:
 
     def _finish_update(self) -> None:
         self._updating = False
+        self._cancel_event = None
         self.update_button.config(state="normal")
+        self.cancel_button.config(state="disabled")
+        self.browser_switch.set_enabled(True)
         self._refresh_dashboard()
 
     # -------------------------------------------------------------- report

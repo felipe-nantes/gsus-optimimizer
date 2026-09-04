@@ -103,3 +103,22 @@ def test_resolve_app_path_relative_resolves_against_app_root(monkeypatch, tmp_pa
     resolved = config.resolve_app_path("models/model.gguf")
 
     assert resolved == (tmp_path / "models" / "model.gguf").resolve()
+
+
+# ------------------------------------------------------------- UI-006 (browser_visible)
+
+def test_browser_visible_defaults_true_when_key_missing_in_old_config(tmp_path, monkeypatch):
+    """Config gravado por versões anteriores não tem a chave -- precisa carregar
+    com o padrão (navegador visível, DEC-077), nunca falhar nem virar False."""
+    _no_saved_credential(monkeypatch)
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text('{"unit": "Clínica Médica", "configured": true}', encoding="utf-8")
+    assert config.load_config(cfg_path).browser_visible is True
+
+
+def test_browser_visible_false_roundtrips_through_config_json(tmp_path, monkeypatch):
+    _no_saved_credential(monkeypatch)
+    cfg_path = tmp_path / "config.json"
+    config.save_config(config.AppConfig(unit="Clínica Médica", configured=True, browser_visible=False), cfg_path)
+    assert '"browser_visible": false' in cfg_path.read_text(encoding="utf-8")
+    assert config.load_config(cfg_path).browser_visible is False
