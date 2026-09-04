@@ -1199,3 +1199,25 @@ Proxima task: design/UX da tela (pedido explicito anterior do usuario) apos a en
 **Verificação:** 420 testes aprovados (331 não visuais, 32 UI isolados e 57 integração/E2E), compilação e checagem de diff aprovadas. Nenhum acesso ao GSUS, banco real, credencial ou instalação durante as prévias.
 
 **Estado de entrega:** código e visual prontos para aprovação. O `setup/GSUSAuditoria-Setup.exe` fornecido pelo usuário continua intacto e contém o visual anterior; gerar uma nova versão do instalador é o próximo passo depois da aprovação das capturas.
+
+---
+
+## 2026-09-04 — Visual novo levado à versão final: instalador 1.1.0 gerado, instalado e verificado (DEC-114)
+
+**Contexto:** o usuário percebeu que a sessão anterior (Codex) tinha aberto a versão de desenvolvimento a partir do código-fonte, não o programa instalado. O log real confirmou: as 7 falhas de atualização de hoje (09:50–09:53) vieram dessa instância dev, que não tem `runtime/llama-server.exe` nem Firefox dentro do repositório; o modelo de IA (4,92 GB) foi baixado para `models/` do repositório; configuração (setor "Auditoria", horário 00:01) e credencial foram salvas na pasta de dados compartilhada; a tarefa agendada não foi registrada (modo dev, por desenho). Banco real: 0 execuções, 0 pacientes -- nenhum acesso ao GSUS chegou a acontecer.
+
+**Pedido do usuário:** levar as alterações visuais (DEC-112/113) para a versão final e funcional do produto, certificando que tudo funciona.
+
+**Feito (worktree `claude/session-continuation-300b65`, com o trabalho não commitado do Codex replicado byte a byte a partir do checkout principal):**
+- Firefox (`playwright-browsers/firefox-1465`, 237 MB) e `runtime/` (45 MB) copiados do app instalado para a worktree -- ambos gitignored, mesmos binários já validados em produção.
+- Inno Setup 6.7.3 instalado via winget em escopo de usuário (autorizado pelo usuário), em `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`.
+- Versão 1.0.0 → 1.1.0 em `installer/gsus-auditoria.iss`. `setup/` adicionado ao `.gitignore`.
+- PyInstaller: 29 s, 448 MB, layout plano (sem `_internal/`), ícone novo no `.exe`. Teste de fumaça do `.exe` empacotado com `GSUS_AUDITORIA_DATA_DIR` apontando para pasta temporária (cópia do config, banco vazio): processo vivo após 14 s, 0 linhas de stderr, dashboard com gráficos matplotlib e ícone na janela -- captura conferida.
+- Inno Setup: 74 s, `installer/output/GSUSAuditoria-Setup.exe` com 120,0 MB, SHA-256 `E2D0E140807DE7F2D57DCAC5406848F95043DE14380E8B4E5B6C169DD52008C5`.
+- Instalado nesta máquina com `/VERYSILENT /NORESTART /SUPPRESSMSGBOXES` (exit 0). Registro do Windows: "GSUS Auditoria versão 1.1.0". Os 1711 arquivos do dist estão na instalação; hashes de `gsus-auditoria.exe`, `python313.dll`, `base_library.zip`, `runtime\llama-server.exe` e `firefox.exe` idênticos ao dist testado. Dados reais em `%LOCALAPPDATA%\GSUSAuditoria` intactos (banco, config, log).
+- Modelo `model.gguf` movido do repositório para `%LOCALAPPDATA%\Programs\GSUS Auditoria\models\` -- o disco tinha 5,7 GB livres, insuficiente para copiar ou rebaixar 4,92 GB com segurança. Antes do move, o arquivo foi carregado no `llama-server.exe` desta máquina: `/health` OK em 6 s, `/completion` respondeu, ~13 tokens/s em CPU.
+- Suíte nesta worktree antes do build: 331 unitários não visuais + 32 UI (isolados) + 57 integração/E2E = 420 aprovados; `compileall` e `git diff --check` OK.
+
+**Pendente (ações do usuário):** fechar as 2 janelas da versão dev ainda abertas (`pythonw -m app.main`); abrir o app instalado → Configurações → Concluir para registrar a tarefa agendada (só o build empacotado registra); primeira execução real supervisionada com "Atualizar agora"; commit deste ciclo.
+
+**Achado registrado, não corrigido (DIAG-002):** `run_diagnosis.classify_top_level_exception` classifica qualquer `playwright.Error` como `FALHA_GSUS` ("o GSUS não respondeu a tempo"). Hoje isso rotulou 7 vezes um Firefox ausente na máquina como instabilidade do hospital -- exatamente o tipo de erro que o auditor não consegue distinguir sozinho. Ver DEC-114.

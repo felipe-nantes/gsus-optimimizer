@@ -273,6 +273,13 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  frequentemente não tem direito de admin na máquina). Build real testado: instalado,
                  aberto sem erro, desinstalado limpo (`unins000.exe`). `installer/output/GSUSAuditoria-
                  Setup.exe` (~107MB, fora do controle de versão).
+                 REBUILD 1.1.0 (2026-09-04, DEC-114): visual novo (DEC-112/113) levado ao
+                 produto final. Build a partir da worktree com Firefox e runtime/ reaproveitados
+                 do app instalado; Inno Setup 6.7.3 instalado nesta máquina via winget (escopo de
+                 usuário). `installer/output/GSUSAuditoria-Setup.exe` 120,0 MB, SHA-256
+                 E2D0E140...08C5, instalado silenciosamente e verificado por hash contra o dist
+                 testado; modelo GGUF movido para dentro da instalação. Tarefa agendada ainda
+                 precisa ser registrada pelo usuário (Configurações → Concluir no build empacotado).
 [x] E2E-001      Teste em máquina limpa (sem Python/Playwright/llama.cpp pré-instalados) --
                  marcado como não feito por muito tempo por engano: na prática, extensivamente
                  executado nesta máquina real desde 2026-08-26 (login headless, paginação de
@@ -589,6 +596,13 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  desligada de noite) calculado ao vivo, faixa nova na tela principal.
                  Testes: +19 unitários (classificação pura) +4 e2e (grava certo nos 3
                  desfechos, incluindo o cenário antes invisível). Suíte completa: 386 passed.
+[ ] DIAG-002     Erro de ambiente rotulado como "falha do GSUS" (achado 2026-09-04, DEC-114):
+                 `classify_top_level_exception` devolve FALHA_GSUS para QUALQUER `playwright.Error`,
+                 inclusive "Executable doesn't exist" (navegador interno ausente) -- hoje isso
+                 registrou 7x "o GSUS não respondeu a tempo" quando o Firefox simplesmente não
+                 existia na instância dev. Proposta: casar "Executable doesn't exist"/"playwright
+                 install" antes do ramo Playwright e devolver FALHA_INESPERADA com orientação de
+                 reinstalar/acionar suporte. +testes unitários em `test_run_diagnosis.py`.
 [x] REPORT-003   Indicadores agregados do serviço (RF-28/RF-29, seção 12 da orientação técnica
                  de auditoria concorrente) -- PLANEJADO em detalhe 2026-09-01 (DEC-099), pedido
                  explícito do usuário pra avançar às "fases finais do projeto". Passou de "não

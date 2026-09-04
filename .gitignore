@@ -17,3 +17,6 @@ installer/dist/
 installer/output/
 .claude/
 *.html.*.tmp
+
+# Instaladores entregues/recebidos (binários de 100MB+, nunca versionar)
+setup/
