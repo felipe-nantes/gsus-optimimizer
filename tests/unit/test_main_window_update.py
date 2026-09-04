@@ -2,6 +2,8 @@
 com GSUSClient/GSUSAdapter substituídos por fakes -- sem Playwright real,
 sem GSUS real. Só UM tk.Tk() por teste (ver test_app_shell.py sobre
 múltiplas instâncias serem instáveis no processo)."""
+import os
+import sys
 import time
 import tkinter as tk
 
@@ -15,12 +17,9 @@ from app.ui.main_window import MainWindow
 
 
 def _tk_available() -> bool:
-    try:
-        root = tk.Tk()
-        root.destroy()
+    if sys.platform in ("win32", "darwin"):
         return True
-    except tk.TclError:
-        return False
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 pytestmark = pytest.mark.skipif(not _tk_available(), reason="Sem display Tk disponível neste ambiente")

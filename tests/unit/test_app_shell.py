@@ -5,6 +5,8 @@ CURRENT_STATE.md).
 Cria no máximo UM tk.Tk() por teste (várias instâncias no mesmo processo
 Python são conhecidas por serem instáveis nesta versão de Tcl/Tk no Windows).
 """
+import os
+import sys
 import tkinter as tk
 from tkinter import ttk
 
@@ -15,12 +17,12 @@ from app.security import credentials
 
 
 def _tk_available() -> bool:
-    try:
-        root = tk.Tk()
-        root.destroy()
+    # Nao crie um Tk apenas para testar disponibilidade: neste runtime do
+    # Windows, destruir um interpretador e criar outro no mesmo processo e
+    # instavel. Os proprios testes garantem um unico Tk por caso.
+    if sys.platform in ("win32", "darwin"):
         return True
-    except tk.TclError:
-        return False
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 pytestmark = pytest.mark.skipif(not _tk_available(), reason="Sem display Tk disponível neste ambiente")

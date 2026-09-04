@@ -4,6 +4,8 @@ ao clicar). Mesmo padrão de `test_lookup_window.py` -- banco real (SQLite
 temporário via `GSUS_AUDITORIA_DATA_DIR`), dados 100% fictícios, só UM
 tk.Tk() por teste."""
 from datetime import datetime, timedelta, timezone
+import os
+import sys
 
 import pytest
 import tkinter as tk
@@ -17,12 +19,9 @@ from app.ui.main_window import MainWindow
 
 
 def _tk_available() -> bool:
-    try:
-        root = tk.Tk()
-        root.destroy()
+    if sys.platform in ("win32", "darwin"):
         return True
-    except tk.TclError:
-        return False
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 pytestmark = pytest.mark.skipif(not _tk_available(), reason="Sem display Tk disponível neste ambiente")
@@ -55,12 +54,22 @@ def test_dashboard_refresh_populates_kpi_cards_and_census_tree(tmp_path, monkeyp
     root = tk.Tk()
     try:
         window = MainWindow(root, cfg)
+        root.update()
 
         assert window._kpi_labels["total_active"]["text"] == "2"
         assert "1 (50.0%)" == window._kpi_labels["with_pending"]["text"]
+        assert set(window._kpi_labels) == {
+            "total_active", "with_pending", "without_edd", "edd_overdue",
+            "dia_vermelho", "dia_verde", "median_resolution",
+        }
+        assert all(
+            child.winfo_x() + child.winfo_width() <= window._control_bar.winfo_width()
+            for child in window._control_bar.winfo_children()
+        )
 
         children = window._census_tree.get_children()
         assert len(children) == 2
+        assert window._census_count_label["text"] == "2 pacientes"
         assert "100" in children and "200" in children
         columns = list(window._census_tree["columns"])
         urgent_values = window._census_tree.item("100", "values")
@@ -117,6 +126,7 @@ def test_census_filter_narrows_visible_rows_without_requerying_db(tmp_path, monk
 
         children = window._census_tree.get_children()
         assert children == ("100",)
+        assert window._census_count_label["text"] == "1 de 2 pacientes"
     finally:
         root.destroy()
 

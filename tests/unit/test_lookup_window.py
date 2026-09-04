@@ -3,6 +3,8 @@ banco LOCAL (nunca GSUS ao vivo), síncrona (sem thread/fila -- SQLite é
 rápido o bastante). Confirma que a busca é genuinamente só-leitura (nenhum
 dado existente é alterado) e que os 3 resultados possíveis (relatório
 aberto, alta, não encontrado) funcionam."""
+import os
+import sys
 import tkinter as tk
 
 import pytest
@@ -15,12 +17,9 @@ from app.ui.lookup_window import LookupWindow
 
 
 def _tk_available() -> bool:
-    try:
-        root = tk.Tk()
-        root.destroy()
+    if sys.platform in ("win32", "darwin"):
         return True
-    except tk.TclError:
-        return False
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 pytestmark = pytest.mark.skipif(not _tk_available(), reason="Sem display Tk disponível neste ambiente")

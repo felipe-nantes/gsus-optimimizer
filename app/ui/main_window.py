@@ -37,6 +37,7 @@ from app.reports.dashboard_metrics import PatientCensusRow
 from app.reports.html_report import PatientLookupResult, generate_patient_report
 from app.storage import database
 from app.storage.repository import Repository
+from app.ui.icons import icon_badge, line_icon, logo_mark
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +54,18 @@ ORIGIN_LABELS = {"INTERNA": "Interna", "EXTERNA": "Externa", "NAO_DEFINIDA": "N�
 # `status_label`, `update_button`). Vermelho/âmbar/verde continuam os MESMOS
 # de PRIORITY_COLORS -- mudar essas cores quebraria a linguagem visual
 # compartilhada com o relatório HTML.
-BG_COLOR = "#f2f4f7"
+OUTER_BG = "#e9e9ec"
+BG_COLOR = "#f5f6f7"
+SIDEBAR_BG = "#ffffff"
 CARD_BG = "#ffffff"
-CARD_BORDER = "#dde1e6"
-BRAND_COLOR = "#1f5f8b"
-BRAND_COLOR_DARK = "#15486b"
-TEXT_PRIMARY = "#1f2937"
-TEXT_MUTED = "#6b7280"
+CARD_BORDER = "#eceef0"
+BRAND_COLOR = "#ff4f0a"
+BRAND_COLOR_DARK = "#d93f00"
+BRAND_SOFT = "#fff0e9"
+SURFACE_SUBTLE = "#f7f7f8"
+TEXT_PRIMARY = "#111315"
+TEXT_MUTED = "#71717a"
+SUCCESS_COLOR = "#208442"
 FONT_FAMILY = "Segoe UI"
 
 # Cor de destaque no topo de cada cartão de KPI -- neutra (BRAND_COLOR) pra
@@ -91,6 +97,29 @@ KPI_ACCENTS = {
     "dia_vermelho": PRIORITY_COLORS["ALTA"],
     "dia_verde": PRIORITY_COLORS["MONITORAMENTO"],
     "median_resolution": BRAND_COLOR,
+}
+
+KPI_CARDS = [
+    ("total_active", "Pacientes ativos"),
+    ("with_pending", "Com pendência ativa"),
+    ("edd_overdue", "EDD vencida"),
+    ("dia_vermelho", "Dia vermelho hoje"),
+]
+
+KPI_SECONDARY = [
+    ("without_edd", "Sem EDD documentada"),
+    ("dia_verde", "Dia verde hoje"),
+    ("median_resolution", "Tempo mediano de resolução"),
+]
+
+CATEGORY_LABELS = {
+    "DIAGNOSTICO": "Diagnóstico",
+    "INTERCONSULTA": "Interconsulta",
+    "PROCEDIMENTO_CIRURGIA": "Procedimento / cirurgia",
+    "TERAPEUTICA": "Terapêutica",
+    "TRANSFERENCIA": "Transferência",
+    "ALTA_BARREIRA": "Barreira de alta",
+    "ADMINISTRATIVA_LOGISTICA": "Administrativa / logística",
 }
 
 # Achado de auditoria de certificação pré-entrega (2026-09-01, RF-29): a
@@ -151,31 +180,43 @@ def configure_app_style() -> None:
 
     style.configure(
         "Primary.TButton", background=BRAND_COLOR, foreground="white",
-        font=(FONT_FAMILY, 10, "bold"), padding=(16, 9), borderwidth=0,
+        font=(FONT_FAMILY, 9, "bold"), padding=(15, 9), borderwidth=0,
     )
     style.map(
         "Primary.TButton",
-        background=[("disabled", "#9db8c8"), ("active", BRAND_COLOR_DARK)],
-        foreground=[("disabled", "#eef3f7")],
+        background=[("disabled", "#f3aa8b"), ("active", BRAND_COLOR_DARK)],
+        foreground=[("disabled", "#fff7f3")],
     )
     style.configure(
         "Secondary.TButton", background=CARD_BG, foreground=BRAND_COLOR,
-        font=(FONT_FAMILY, 10), padding=(14, 9), borderwidth=1, relief="solid",
+        font=(FONT_FAMILY, 9), padding=(13, 8), borderwidth=1, relief="solid",
     )
-    style.map("Secondary.TButton", background=[("active", "#eaf1f6")])
+    style.map("Secondary.TButton", background=[("active", "#f3f3f4")])
+    style.configure(
+        "Quiet.TButton", background=CARD_BG, foreground=TEXT_MUTED,
+        font=(FONT_FAMILY, 9), padding=(10, 8), borderwidth=0,
+    )
+    style.map(
+        "Quiet.TButton",
+        background=[("active", BRAND_SOFT)], foreground=[("active", TEXT_PRIMARY)],
+    )
 
     style.configure(
         "Treeview", background=CARD_BG, fieldbackground=CARD_BG, foreground=TEXT_PRIMARY,
-        rowheight=26, font=(FONT_FAMILY, 9), borderwidth=0,
+        rowheight=30, font=(FONT_FAMILY, 9), borderwidth=0,
     )
     style.configure(
-        "Treeview.Heading", background=BRAND_COLOR, foreground="white",
-        font=(FONT_FAMILY, 9, "bold"), relief="flat", padding=(6, 6),
+        "Treeview.Heading", background="#f2f3f4", foreground=TEXT_PRIMARY,
+        font=(FONT_FAMILY, 9, "bold"), relief="flat", padding=(7, 8),
     )
-    style.map("Treeview.Heading", background=[("active", BRAND_COLOR_DARK)])
-    style.map("Treeview", background=[("selected", BRAND_COLOR)], foreground=[("selected", "white")])
+    style.map("Treeview.Heading", background=[("active", "#e9eaec")])
+    style.map("Treeview", background=[("selected", "#1c1d20")], foreground=[("selected", "white")])
 
-    style.configure("TEntry", padding=(6, 5))
+    style.configure(
+        "TEntry", padding=(8, 7), fieldbackground=CARD_BG, foreground=TEXT_PRIMARY,
+        bordercolor=CARD_BORDER, lightcolor=CARD_BORDER, darkcolor=CARD_BORDER,
+    )
+    style.map("TEntry", bordercolor=[("focus", BRAND_COLOR)], lightcolor=[("focus", BRAND_COLOR)])
 
 
 class MainWindow:
@@ -203,21 +244,40 @@ class MainWindow:
         self._kpi_labels: dict[str, tk.Label] = {}
         self._refresh_job_id: str | None = None
 
-        root.geometry("1200x820")
+        screen_width = root.winfo_screenwidth()
+        screen_height = root.winfo_screenheight()
+        window_width = min(1280, max(1024, screen_width - 80))
+        window_height = min(860, max(700, screen_height - 120))
+        root.geometry(f"{window_width}x{window_height}")
         root.minsize(1024, 700)
         root.resizable(True, True)
-        root.configure(bg=BG_COLOR)
+        root.configure(bg=OUTER_BG)
         root.grid_columnconfigure(0, weight=1)
-        root.grid_rowconfigure(4, weight=3)  # gráficos
-        root.grid_rowconfigure(6, weight=2)  # tabela de censo
+        root.grid_rowconfigure(0, weight=1)
+        root.grid_rowconfigure(4, weight=0)
+        root.grid_rowconfigure(6, weight=0)
 
         self._build_style()
-        self._build_control_bar(root)
-        self._build_diagnostic_banner(root)
-        self._build_kpi_cards(root)
-        self._build_charts(root)
-        self._build_unit_strip(root)
-        self._build_census_table(root)
+        shell = tk.Frame(root, bg=OUTER_BG)
+        shell.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        shell.grid_columnconfigure(1, weight=1)
+        shell.grid_rowconfigure(0, weight=1)
+        self._shell = shell
+
+        self._build_sidebar(shell)
+        content = tk.Frame(shell, bg=BG_COLOR)
+        content.grid(row=0, column=1, sticky="nsew")
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_rowconfigure(4, weight=3, minsize=78)
+        content.grid_rowconfigure(6, weight=2)
+        self._content = content
+
+        self._build_control_bar(content)
+        self._build_diagnostic_banner(content)
+        self._build_kpi_cards(content)
+        self._build_charts(content)
+        self._build_unit_strip(content)
+        self._build_census_table(content)
 
         self._refresh_dashboard()
         self._refresh_job_id = self.root.after(self.DASHBOARD_REFRESH_INTERVAL_MS, self._periodic_refresh)
@@ -237,44 +297,127 @@ class MainWindow:
     def _build_style(self) -> None:
         configure_app_style()
 
+    def _build_sidebar(self, shell: tk.Frame) -> None:
+        sidebar = tk.Frame(shell, bg=SIDEBAR_BG, width=190)
+        sidebar.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+        sidebar.grid_propagate(False)
+        sidebar.grid_columnconfigure(0, weight=1)
+        sidebar.grid_rowconfigure(2, weight=1)
+        self._sidebar = sidebar
+
+        brand = tk.Frame(sidebar, bg=SIDEBAR_BG)
+        brand.grid(row=0, column=0, sticky="ew", padx=22, pady=(25, 29))
+        logo_mark(brand, size=22, background=SIDEBAR_BG).pack(side="left")
+        tk.Label(
+            brand, text="GSUS", font=(FONT_FAMILY, 12, "bold"),
+            bg=SIDEBAR_BG, fg=TEXT_PRIMARY,
+        ).pack(side="left", padx=(8, 0))
+
+        navigation = tk.Frame(sidebar, bg=SIDEBAR_BG)
+        navigation.grid(row=1, column=0, sticky="new")
+        tk.Label(
+            navigation, text="MENU PRINCIPAL", font=(FONT_FAMILY, 7, "bold"),
+            bg=SIDEBAR_BG, fg=TEXT_MUTED,
+        ).pack(anchor="w", padx=22, pady=(0, 9))
+        self._sidebar_item(navigation, "Dashboard", "dashboard", active=True)
+        self._sidebar_item(navigation, "Abrir relatório", "report", command=self._on_open_report)
+        self._sidebar_item(navigation, "Localizar paciente", "search", command=self._on_lookup)
+
+        tk.Frame(navigation, bg=CARD_BORDER, height=1).pack(fill="x", padx=22, pady=18)
+        tk.Label(
+            navigation, text="OUTROS", font=(FONT_FAMILY, 7, "bold"),
+            bg=SIDEBAR_BG, fg=TEXT_MUTED,
+        ).pack(anchor="w", padx=22, pady=(0, 9))
+        self._sidebar_item(navigation, "Configurações", "settings", command=self._on_settings)
+
+        routine = tk.Frame(sidebar, bg="#f7f8ef", highlightbackground="#eef0e5", highlightthickness=1)
+        routine.grid(row=3, column=0, sticky="sew", padx=14, pady=14)
+        tk.Label(
+            routine, text="ROTINA AUTOMÁTICA", font=(FONT_FAMILY, 7, "bold"),
+            bg="#f7f8ef", fg=TEXT_MUTED,
+        ).pack(anchor="w", padx=14, pady=(13, 4))
+        tk.Label(
+            routine, text=self.app_config.schedule_time, font=(FONT_FAMILY, 18, "bold"),
+            bg="#f7f8ef", fg=TEXT_PRIMARY,
+        ).pack(anchor="w", padx=14)
+        tk.Label(
+            routine, text=self.app_config.unit, font=(FONT_FAMILY, 8),
+            bg="#f7f8ef", fg=TEXT_MUTED, wraplength=140, justify="left",
+        ).pack(anchor="w", padx=14, pady=(1, 13))
+
+    def _sidebar_item(
+        self,
+        parent: tk.Frame,
+        label: str,
+        icon_name: str,
+        *,
+        command: Callable[[], None] | None = None,
+        active: bool = False,
+    ) -> None:
+        bg = BRAND_SOFT if active else SIDEBAR_BG
+        fg = TEXT_PRIMARY if active else "#4f5157"
+        row = tk.Frame(parent, bg=bg, cursor="hand2" if command else "arrow")
+        row.pack(fill="x", padx=(8, 12), pady=2)
+        rail = tk.Frame(row, bg=BRAND_COLOR if active else bg, width=3)
+        rail.pack(side="left", fill="y")
+        icon = line_icon(row, icon_name, size=16, color=fg, background=bg)
+        icon.pack(side="left", padx=(12, 10), pady=9)
+        text = tk.Label(row, text=label, font=(FONT_FAMILY, 9, "bold" if active else "normal"), bg=bg, fg=fg)
+        text.pack(side="left")
+        if command is not None:
+            for widget in (row, rail, icon, text):
+                widget.bind("<Button-1>", lambda _event, callback=command: callback())
+
     def _build_control_bar(self, root: tk.Tk) -> None:
         bar = tk.Frame(root, bg=BG_COLOR)
-        bar.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
-        bar.grid_columnconfigure(4, weight=1)
+        bar.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 7))
+        bar.grid_columnconfigure(0, weight=1)
         self._control_bar = bar
         bar.bind("<Destroy>", self._on_control_bar_destroyed)
 
+        title = tk.Frame(bar, bg=BG_COLOR)
+        title.grid(row=0, column=0, sticky="w")
         tk.Label(
-            bar, text="AUDITORIA GSUS", font=(FONT_FAMILY, 16, "bold"), bg=BG_COLOR, fg=BRAND_COLOR_DARK,
-        ).grid(row=0, column=0, sticky="w")
+            title, text="Dashboard", font=(FONT_FAMILY, 20, "bold"),
+            bg=BG_COLOR, fg=TEXT_PRIMARY,
+        ).pack(anchor="w")
+        tk.Label(
+            title, text="Visão consolidada da auditoria de leitos",
+            font=(FONT_FAMILY, 9), bg=BG_COLOR, fg=TEXT_MUTED,
+        ).pack(anchor="w", pady=(1, 0))
 
         self.update_button = ttk.Button(
             bar, text="ATUALIZAR AGORA", command=self._on_update, style="Primary.TButton",
         )
-        self.update_button.grid(row=0, column=1, padx=(20, 6))
+        self.update_button.grid(row=0, column=1, padx=(12, 6))
         ttk.Button(
             bar, text="ABRIR RELATÓRIO", command=self._on_open_report, style="Secondary.TButton",
-        ).grid(row=0, column=2, padx=6)
-        ttk.Button(
-            bar, text="LOCALIZAR PACIENTE", command=self._on_lookup, style="Secondary.TButton",
-        ).grid(row=0, column=3, padx=6)
+        ).grid(row=0, column=2)
 
-        info = tk.Frame(bar, bg=BG_COLOR)
-        info.grid(row=0, column=5, sticky="e")
-        tk.Label(info, text=f"Setor: {self.app_config.unit}", font=(FONT_FAMILY, 9), bg=BG_COLOR, fg=TEXT_MUTED).pack(anchor="e")
+        status_bar = tk.Frame(bar, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
+        status_bar.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        status_bar.grid_columnconfigure(2, weight=1)
         tk.Label(
-            info, text=f"Próxima atualização: {self.app_config.schedule_time}",
-            font=(FONT_FAMILY, 9), bg=BG_COLOR, fg=TEXT_MUTED,
-        ).pack(anchor="e")
-
-        settings_label = tk.Label(bar, text="Configurações", font=(FONT_FAMILY, 9, "underline"), bg=BG_COLOR, fg=BRAND_COLOR, cursor="hand2")
-        settings_label.grid(row=0, column=6, padx=(16, 0))
-        settings_label.bind("<Button-1>", lambda _event: self._on_settings())
+            status_bar, text="●", font=(FONT_FAMILY, 9), bg=CARD_BG, fg=SUCCESS_COLOR,
+        ).grid(row=0, column=0, sticky="w", padx=(14, 5), pady=8)
+        tk.Label(
+            status_bar, text="STATUS", font=(FONT_FAMILY, 8, "bold"),
+            bg=CARD_BG, fg=TEXT_MUTED,
+        ).grid(row=0, column=1, sticky="w")
 
         self.status_label = tk.Label(
-            bar, text=self._initial_status_text(), font=(FONT_FAMILY, 9), bg=BG_COLOR, fg=TEXT_MUTED, justify="left",
+            status_bar, text=self._initial_status_text(), font=(FONT_FAMILY, 9),
+            bg=CARD_BG, fg=TEXT_PRIMARY, justify="left",
         )
-        self.status_label.grid(row=1, column=0, columnspan=7, sticky="w", pady=(10, 0))
+        self.status_label.grid(row=0, column=2, sticky="w", padx=(9, 12))
+        tk.Label(
+            status_bar, text=f"Setor  {self.app_config.unit}", font=(FONT_FAMILY, 9, "bold"),
+            bg=CARD_BG, fg=TEXT_PRIMARY,
+        ).grid(row=0, column=3, padx=(12, 18))
+        tk.Label(
+            status_bar, text=f"Próxima atualização  {self.app_config.schedule_time}",
+            font=(FONT_FAMILY, 9), bg=CARD_BG, fg=TEXT_MUTED,
+        ).grid(row=0, column=4, padx=(0, 18))
 
     def _build_diagnostic_banner(self, root: tk.Tk) -> None:
         """DIAG-001 (2026-09-03, pedido do usuário): mostra, em linguagem
@@ -289,7 +432,7 @@ class MainWindow:
             root, text="", font=(FONT_FAMILY, 9, "bold"), anchor="w", justify="left",
             wraplength=1150, padx=12, pady=8,
         )
-        self._diagnostic_banner.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 4))
+        self._diagnostic_banner.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 4))
         self._diagnostic_banner.grid_remove()
 
     def _render_diagnostic_banner(self, repo: Repository) -> None:
@@ -321,27 +464,60 @@ class MainWindow:
 
     def _build_kpi_cards(self, root: tk.Tk) -> None:
         frame = tk.Frame(root, bg=BG_COLOR)
-        frame.grid(row=2, column=0, sticky="ew", padx=16, pady=8)
+        frame.grid(row=2, column=0, sticky="ew", padx=18, pady=(5, 7))
 
-        cards = [
-            ("total_active", "Pacientes ativos"),
-            ("with_pending", "Com pendência ativa"),
-            ("without_edd", "Sem EDD documentada"),
-            ("edd_overdue", "EDD vencida"),
-            ("dia_vermelho", "Dia vermelho hoje"),
-            ("dia_verde", "Dia verde hoje"),
-            ("median_resolution", "Tempo mediano de resolução"),
-        ]
-        for i, (key, title) in enumerate(cards):
+        heading = tk.Frame(frame, bg=BG_COLOR)
+        heading.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        tk.Label(
+            heading, text="Indicadores do serviço", font=(FONT_FAMILY, 11, "bold"),
+            bg=BG_COLOR, fg=TEXT_PRIMARY,
+        ).pack(side="left")
+        tk.Label(
+            heading, text="atualizados a partir da base local", font=(FONT_FAMILY, 9),
+            bg=BG_COLOR, fg=TEXT_MUTED,
+        ).pack(side="left", padx=(8, 0))
+
+        for i, (key, title) in enumerate(KPI_CARDS):
             frame.grid_columnconfigure(i, weight=1)
             card = tk.Frame(frame, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
-            card.grid(row=0, column=i, sticky="nsew", padx=4)
-            tk.Frame(card, bg=KPI_ACCENTS.get(key, BRAND_COLOR), height=4).pack(fill="x", side="top")
-            value_label = tk.Label(card, text="—", font=(FONT_FAMILY, 22, "bold"), bg=CARD_BG, fg=TEXT_PRIMARY)
-            value_label.pack(pady=(12, 0))
+            card.grid(row=1, column=i, sticky="nsew", padx=(0 if i == 0 else 4, 0 if i == 3 else 4))
+            body = tk.Frame(card, bg=CARD_BG)
+            body.pack(fill="both", expand=True, padx=14, pady=(9, 8))
+            top = tk.Frame(body, bg=CARD_BG)
+            top.pack(fill="x")
             tk.Label(
-                card, text=title, font=(FONT_FAMILY, 9), fg=TEXT_MUTED, bg=CARD_BG, wraplength=140, justify="center",
-            ).pack(pady=(2, 12))
+                top, text=title, font=(FONT_FAMILY, 9), fg=TEXT_PRIMARY, bg=CARD_BG,
+            ).pack(side="left")
+            icon_badge(
+                top, "arrow", size=26, color=KPI_ACCENTS.get(key, TEXT_PRIMARY),
+                background=CARD_BG, badge_background=SURFACE_SUBTLE,
+            ).pack(side="right")
+            value_label = tk.Label(
+                body, text="—", font=(FONT_FAMILY, 21, "bold"), bg=CARD_BG, fg=TEXT_PRIMARY,
+            )
+            value_label.pack(anchor="w", pady=(1, 4))
+            tk.Frame(body, bg=CARD_BORDER, height=1).pack(fill="x")
+            tk.Label(
+                body, text="Consolidado da base local", font=(FONT_FAMILY, 8), fg=TEXT_MUTED, bg=CARD_BG,
+            ).pack(anchor="w", pady=(4, 0))
+            self._kpi_labels[key] = value_label
+
+        secondary = tk.Frame(frame, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
+        secondary.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(7, 0))
+        for i, (key, title) in enumerate(KPI_SECONDARY):
+            secondary.grid_columnconfigure(i, weight=1)
+            item = tk.Frame(secondary, bg=CARD_BG)
+            item.grid(row=0, column=i, sticky="ew", padx=15, pady=7)
+            value_label = tk.Label(
+                item, text="—", font=(FONT_FAMILY, 14, "bold"), bg=CARD_BG,
+                fg=KPI_ACCENTS.get(key, TEXT_PRIMARY),
+            )
+            value_label.pack(side="left")
+            tk.Label(
+                item, text=title, font=(FONT_FAMILY, 9), fg=TEXT_MUTED, bg=CARD_BG,
+            ).pack(side="left", padx=(8, 0))
+            if i < len(KPI_SECONDARY) - 1:
+                tk.Frame(secondary, bg=CARD_BORDER, width=1).grid(row=0, column=i, sticky="nse", pady=8)
             self._kpi_labels[key] = value_label
 
     def _build_charts(self, root: tk.Tk) -> None:
@@ -353,16 +529,56 @@ class MainWindow:
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
         charts_frame = tk.Frame(root, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
-        charts_frame.grid(row=4, column=0, sticky="nsew", padx=16, pady=8)
+        charts_frame.grid(row=4, column=0, sticky="nsew", padx=18, pady=7)
+        charts_frame.grid_columnconfigure(0, weight=1)
+        charts_frame.grid_rowconfigure(1, weight=1)
 
-        self._fig = Figure(figsize=(11, 5), dpi=100, constrained_layout=True, facecolor=CARD_BG)
-        axes = self._fig.subplots(2, 2)
-        self._ax_category, self._ax_priority = axes[0]
-        self._ax_origin, self._ax_trend = axes[1]
+        chart_heading = tk.Frame(charts_frame, bg=CARD_BG)
+        chart_heading.grid(row=0, column=0, sticky="ew", padx=14, pady=(11, 2))
+        tk.Label(
+            chart_heading, text="Panorama das pendências", font=(FONT_FAMILY, 11, "bold"),
+            bg=CARD_BG, fg=TEXT_PRIMARY,
+        ).pack(side="left")
+        tk.Label(
+            chart_heading, text="distribuição e evolução recente", font=(FONT_FAMILY, 9),
+            bg=CARD_BG, fg=TEXT_MUTED,
+        ).pack(side="left", padx=(8, 0))
+
+        # Uma única faixa horizontal mantém os quatro gráficos legíveis na
+        # altura real da dashboard. A composição anterior em duas linhas
+        # funcionava matematicamente, mas espremia títulos e rótulos em
+        # telas de notebook (achado na revisão visual da referência).
+        self._fig = Figure(figsize=(11, 2.15), dpi=100, constrained_layout=True, facecolor=CARD_BG)
+        grid = self._fig.add_gridspec(1, 4, width_ratios=(1.65, 1, 1, 1.25))
+        self._ax_category = self._fig.add_subplot(grid[0, 0])
+        self._ax_priority = self._fig.add_subplot(grid[0, 1])
+        self._ax_origin = self._fig.add_subplot(grid[0, 2])
+        self._ax_trend = self._fig.add_subplot(grid[0, 3])
 
         self._chart_canvas = FigureCanvasTkAgg(self._fig, master=charts_frame)
-        self._chart_canvas.get_tk_widget().configure(bg=CARD_BG, highlightthickness=0)
-        self._chart_canvas.get_tk_widget().pack(fill="both", expand=True, padx=8, pady=8)
+        self._chart_canvas.get_tk_widget().configure(bg=CARD_BG, highlightthickness=0, height=215)
+        self._chart_canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=9, pady=(0, 8))
+
+        # Em 1024×700 não há altura física suficiente para eixos, títulos
+        # e a tabela ao mesmo tempo. Nesse caso mostramos os mesmos totais
+        # numa faixa textual; ao ampliar a janela, os gráficos reaparecem.
+        self._charts_compact_label = tk.Label(
+            charts_frame, text="", font=(FONT_FAMILY, 9), bg=CARD_BG, fg=TEXT_MUTED,
+            anchor="w", justify="left", wraplength=760, padx=9, pady=7,
+        )
+        self._charts_compact_label.grid(row=1, column=0, sticky="ew", padx=9, pady=(0, 5))
+        self._charts_compact_label.grid_remove()
+        self._charts_frame = charts_frame
+        charts_frame.bind("<Configure>", self._on_charts_resize)
+
+    def _on_charts_resize(self, event: tk.Event) -> None:
+        compact = event.height < 135
+        if compact:
+            self._chart_canvas.get_tk_widget().grid_remove()
+            self._charts_compact_label.grid()
+        else:
+            self._charts_compact_label.grid_remove()
+            self._chart_canvas.get_tk_widget().grid()
 
     def _style_axes(self, ax) -> None:
         """Espinha/eixo consistentes entre os 4 gráficos (design/UX,
@@ -378,32 +594,56 @@ class MainWindow:
         ax.title.set_color(TEXT_PRIMARY)
         ax.title.set_fontsize(10)
         ax.title.set_fontweight("bold")
+        ax.title.set_horizontalalignment("left")
+        ax.title.set_position((0, 1.0))
 
     def _build_unit_strip(self, root: tk.Tk) -> None:
         self._unit_strip = tk.Label(
-            root, text="", font=(FONT_FAMILY, 9), fg=TEXT_MUTED, bg=BG_COLOR,
-            justify="left", anchor="w", wraplength=1150,
+            root, text="", font=(FONT_FAMILY, 9), fg=BRAND_COLOR_DARK, bg=BRAND_SOFT,
+            justify="left", anchor="w", wraplength=1180, padx=12, pady=7,
         )
-        self._unit_strip.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 4))
+        self._unit_strip.grid(row=5, column=0, sticky="ew", padx=18, pady=(0, 7))
 
     def _build_census_table(self, root: tk.Tk) -> None:
         frame = tk.Frame(root, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
-        frame.grid(row=6, column=0, sticky="nsew", padx=16, pady=(0, 14))
+        frame.grid(row=6, column=0, sticky="nsew", padx=18, pady=(0, 16))
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(1, weight=1)
 
-        filter_row = tk.Frame(frame, bg=CARD_BG)
-        filter_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
+        table_heading = tk.Frame(frame, bg=CARD_BG)
+        table_heading.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(10, 7))
+        table_heading.grid_columnconfigure(1, weight=1)
+        heading_copy = tk.Frame(table_heading, bg=CARD_BG)
+        heading_copy.grid(row=0, column=0, sticky="w")
         tk.Label(
-            filter_row, text="Filtrar (leito/prontuário/unidade/categoria/pendência):",
-            font=(FONT_FAMILY, 9), bg=CARD_BG, fg=TEXT_PRIMARY,
+            heading_copy, text="Censo de pacientes", font=(FONT_FAMILY, 11, "bold"),
+            bg=CARD_BG, fg=TEXT_PRIMARY,
+        ).pack(side="left")
+        self._census_count_label = tk.Label(
+            heading_copy, text="0 pacientes", font=(FONT_FAMILY, 9), bg=CARD_BG, fg=TEXT_MUTED,
+        )
+        self._census_count_label.pack(side="left", padx=(8, 0))
+        tk.Label(
+            table_heading, text="Clique duas vezes em uma linha para abrir o relatório individual",
+            font=(FONT_FAMILY, 8), bg=CARD_BG, fg=TEXT_MUTED,
+        ).grid(row=0, column=1, sticky="w", padx=(14, 8))
+
+        filter_row = tk.Frame(table_heading, bg=CARD_BG)
+        filter_row.grid(row=0, column=2, sticky="e")
+        tk.Label(
+            filter_row, text="BUSCAR", font=(FONT_FAMILY, 8, "bold"), bg=CARD_BG, fg=TEXT_MUTED,
         ).pack(side="left")
         self._census_filter_var = tk.StringVar()
         self._census_filter_var.trace_add("write", lambda *_args: self._apply_census_filter())
-        ttk.Entry(filter_row, textvariable=self._census_filter_var, width=30).pack(side="left", padx=(8, 0))
+        ttk.Entry(filter_row, textvariable=self._census_filter_var, width=28).pack(side="left", padx=(8, 0))
 
         columns = [col_id for col_id, _label, _width in CENSUS_COLUMNS]
-        self._census_tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        # Quatro linhas visíveis mantêm a tabela útil sem roubar a altura
+        # dos gráficos em telas de notebook; a rolagem preserva o acesso ao
+        # censo completo.
+        self._census_tree = ttk.Treeview(
+            frame, columns=columns, show="headings", selectmode="browse", height=4,
+        )
         for col_id, label, width in CENSUS_COLUMNS:
             self._census_tree.heading(col_id, text=label, command=lambda c=col_id: self._sort_census_by(c))
             self._census_tree.column(col_id, width=width, anchor="w")
@@ -413,8 +653,8 @@ class MainWindow:
         # combinada com a tag de prioridade (cor do texto) no mesmo item;
         # tags diferentes controlam propriedades diferentes sem conflito.
         self._census_tree.tag_configure("oddrow", background=CARD_BG)
-        self._census_tree.tag_configure("evenrow", background="#f5f7fa")
-        self._census_tree.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=(0, 10))
+        self._census_tree.tag_configure("evenrow", background=SURFACE_SUBTLE)
+        self._census_tree.grid(row=1, column=0, sticky="nsew", padx=(12, 0), pady=(0, 10))
 
         vscroll = ttk.Scrollbar(frame, orient="vertical", command=self._census_tree.yview)
         self._census_tree.configure(yscrollcommand=vscroll.set)
@@ -426,7 +666,12 @@ class MainWindow:
         # área visível, sem nenhum jeito de alcançá-las.
         hscroll = ttk.Scrollbar(frame, orient="horizontal", command=self._census_tree.xview)
         self._census_tree.configure(xscrollcommand=hscroll.set)
-        hscroll.grid(row=2, column=0, sticky="ew")
+        hscroll.grid(row=2, column=0, sticky="ew", padx=(12, 0), pady=(0, 3))
+
+        self._census_empty_label = tk.Label(
+            frame, text="Nenhum paciente encontrado para este filtro.",
+            font=(FONT_FAMILY, 10), bg=CARD_BG, fg=TEXT_MUTED,
+        )
 
         self._census_tree.bind("<Double-1>", lambda _event: self._on_census_row_open())
 
@@ -583,7 +828,17 @@ class MainWindow:
         self._kpi_labels["median_resolution"].config(text=_format_hours(indicators.median_resolution_hours))
 
     def _render_charts(self, indicators: dashboard_metrics.ServiceIndicators, snapshots) -> None:
-        self._render_bar_chart(self._ax_category, indicators.by_category, "Pendências por categoria")
+        self._charts_compact_label.config(
+            text=(
+                f"{sum(indicators.by_category.values())} pendências  ·  "
+                f"Alta {indicators.by_priority.get('ALTA', 0)}  ·  "
+                f"Média {indicators.by_priority.get('MEDIA', 0)}  ·  "
+                f"Monitoramento {indicators.by_priority.get('MONITORAMENTO', 0)}  ·  "
+                f"Interna {indicators.by_origin.get('INTERNA', 0)}  ·  "
+                f"Externa {indicators.by_origin.get('EXTERNA', 0)}"
+            )
+        )
+        self._render_bar_chart(self._ax_category, indicators.by_category, "Categorias")
         self._render_priority_chart(indicators.by_priority)
         self._render_origin_chart(indicators.by_origin)
         self._render_trend_chart(snapshots)
@@ -592,21 +847,36 @@ class MainWindow:
     def _render_bar_chart(self, ax, counts: dict[str, int], title: str) -> None:
         ax.clear()
         self._style_axes(ax)
-        ax.set_title(title)
+        ax.set_title(title, pad=9, loc="left", color=TEXT_PRIMARY, fontsize=9, fontweight="bold")
         if not counts:
             ax.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=ax.transAxes, color=TEXT_MUTED)
             ax.set_xticks([])
             ax.set_yticks([])
             return
-        labels = list(counts.keys())
-        values = [counts[label] for label in labels]
-        ax.barh(labels, values, color=BRAND_COLOR)
+        ordered = sorted(counts.items(), key=lambda item: (item[1], item[0]))
+        labels = [CATEGORY_LABELS.get(label, label.replace("_", " ").title()) for label, _value in ordered]
+        values = [value for _label, value in ordered]
+        bars = ax.barh(labels, values, color=BRAND_COLOR, height=0.58)
+        ax.grid(axis="x", color=CARD_BORDER, linewidth=0.7, alpha=0.75)
+        ax.set_axisbelow(True)
+        ax.set_xlim(0, max(values) * 1.18 if max(values) else 1)
+        from matplotlib.ticker import MaxNLocator
+
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=5))
+        for bar, value in zip(bars, values):
+            ax.text(
+                value + max(values) * 0.025, bar.get_y() + bar.get_height() / 2, str(value),
+                va="center", ha="left", fontsize=8, color=TEXT_MUTED,
+            )
 
     def _render_priority_chart(self, by_priority: dict[str, int]) -> None:
         ax = self._ax_priority
         ax.clear()
         self._style_axes(ax)
-        ax.set_title("Pendências por prioridade")
+        ax.set_title(
+            "Prioridade", pad=9, loc="left",
+            color=TEXT_PRIMARY, fontsize=9, fontweight="bold",
+        )
         order = ["ALTA", "MEDIA", "MONITORAMENTO"]
         present = [p for p in order if by_priority.get(p)]
         if not present:
@@ -614,35 +884,53 @@ class MainWindow:
             ax.set_xticks([])
             ax.set_yticks([])
             return
+        present = list(reversed(present))
         values = [by_priority[p] for p in present]
+        labels = [{"ALTA": "Alta", "MEDIA": "Média", "MONITORAMENTO": "Monitoramento"}[p] for p in present]
         colors = [PRIORITY_COLORS[p] for p in present]
-        ax.pie(
-            values, labels=present, colors=colors, autopct="%1.0f%%", textprops={"fontsize": 8, "color": "white"},
-            wedgeprops={"edgecolor": CARD_BG, "linewidth": 1.5},
-        )
+        bars = ax.barh(labels, values, color=colors, height=0.48)
+        ax.set_xlim(0, max(values) * 1.2 if max(values) else 1)
+        ax.set_xticks([])
+        for bar, value in zip(bars, values):
+            ax.text(
+                value + max(values) * 0.035, bar.get_y() + bar.get_height() / 2, str(value),
+                va="center", ha="left", fontsize=8, color=TEXT_MUTED,
+            )
 
     def _render_origin_chart(self, by_origin: dict[str, int]) -> None:
         ax = self._ax_origin
         ax.clear()
         self._style_axes(ax)
-        ax.set_title("Barreiras: interno × externo")
+        ax.set_title(
+            "Origem", pad=9, loc="left",
+            color=TEXT_PRIMARY, fontsize=9, fontweight="bold",
+        )
         if not by_origin:
             ax.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=ax.transAxes, color=TEXT_MUTED)
             ax.set_xticks([])
             ax.set_yticks([])
             return
-        labels = [ORIGIN_LABELS.get(key, key) for key in by_origin]
-        values = list(by_origin.values())
-        ax.pie(
-            values, labels=labels, colors=[BRAND_COLOR, "#7aa9c4"], autopct="%1.0f%%",
-            textprops={"fontsize": 8, "color": "white"}, wedgeprops={"edgecolor": CARD_BG, "linewidth": 1.5},
-        )
+        rows = list(reversed(list(by_origin.items())))
+        labels = [ORIGIN_LABELS.get(key, key) for key, _value in rows]
+        values = [value for _key, value in rows]
+        colors = ["#c8cbd0" if key == "EXTERNA" else BRAND_COLOR for key, _value in rows]
+        bars = ax.barh(labels, values, color=colors, height=0.48)
+        ax.set_xlim(0, max(values) * 1.2 if max(values) else 1)
+        ax.set_xticks([])
+        for bar, value in zip(bars, values):
+            ax.text(
+                value + max(values) * 0.035, bar.get_y() + bar.get_height() / 2, str(value),
+                va="center", ha="left", fontsize=8, color=TEXT_MUTED,
+            )
 
     def _render_trend_chart(self, snapshots) -> None:
         ax = self._ax_trend
         ax.clear()
         self._style_axes(ax)
-        ax.set_title("Tendência de dias vermelhos")
+        ax.set_title(
+            "Dias vermelhos", pad=9, loc="left",
+            color=TEXT_PRIMARY, fontsize=9, fontweight="bold",
+        )
         if len(snapshots) < 2:
             ax.text(
                 0.5, 0.5, "Ainda sem histórico suficiente\n(acumula a cada execução)",
@@ -655,9 +943,15 @@ class MainWindow:
         y = [row["patients_dia_vermelho"] for row in snapshots]
         labels = [row["created_at"][5:10] for row in snapshots]  # MM-DD
         ax.plot(x, y, color=PRIORITY_COLORS["ALTA"], marker="o", markersize=4, linewidth=2)
+        ax.fill_between(x, y, color=PRIORITY_COLORS["ALTA"], alpha=0.08)
+        ax.grid(axis="y", color=CARD_BORDER, linewidth=0.7, alpha=0.75)
+        ax.set_axisbelow(True)
+        from matplotlib.ticker import MaxNLocator
+
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=4))
         step = max(len(labels) // 6, 1)
         ax.set_xticks(x[::step])
-        ax.set_xticklabels(labels[::step], rotation=45, ha="right")
+        ax.set_xticklabels([label[3:5] + "/" + label[:2] for label in labels[::step]], rotation=0)
 
     def _render_unit_strip(self, unit_census) -> None:
         if not unit_census:
@@ -743,6 +1037,18 @@ class MainWindow:
             )
             stripe = "evenrow" if i % 2 == 0 else "oddrow"
             self._census_tree.insert("", "end", iid=row.record_number, values=values, tags=(row.main_priority, stripe))
+
+        total = len(self._census_rows_all)
+        visible = len(rows)
+        if visible == total:
+            count_text = f"{total} paciente" if total == 1 else f"{total} pacientes"
+        else:
+            count_text = f"{visible} de {total} pacientes"
+        self._census_count_label.config(text=count_text)
+        if visible:
+            self._census_empty_label.place_forget()
+        else:
+            self._census_empty_label.place(relx=0.5, rely=0.66, anchor="center")
 
     def _on_census_row_open(self) -> None:
         selection = self._census_tree.selection()

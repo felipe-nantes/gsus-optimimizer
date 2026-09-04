@@ -17,6 +17,7 @@ from app import config
 from app.security import credentials
 from app.storage import database
 from app.ui.lookup_window import LookupWindow
+from app.ui.icons import apply_window_icon
 from app.ui.main_window import MainWindow
 from app.ui.setup_window import SetupWindow
 
@@ -120,6 +121,7 @@ def build_app() -> tk.Tk:
 
     root = tk.Tk()
     root.title("GSUS Auditoria")
+    apply_window_icon(root)
     root.resizable(False, False)
 
     render(root, app_config)
