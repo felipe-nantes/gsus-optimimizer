@@ -1269,3 +1269,15 @@ Proxima task: design/UX da tela (pedido explicito anterior do usuario) apos a en
 - **Build:** PyInstaller; teste de fumaça do `.exe` empacotado com pasta de dados temporária. Inno Setup: `installer/output/GSUSAuditoria-Setup.exe` 120,0 MB, SHA-256 `85A908F254AB2A12B5182EDD0B0378E924A7DC447DA188E2058B7E105796C717`. Instalação: instalada silenciosamente nesta máquina (exit 0) após fechar a janela ociosa; versão 1.3.0 no registro do Windows; .exe idêntico ao dist testado por hash; 1712 arquivos = dist; modelo/Firefox/runtime preservados; dados reais intactos.
 
 **Não feito (registrado):** fechar a janela no meio de uma atualização ainda deixa a run como `RUNNING` (o resume corrige na execução seguinte); ligar o fechamento da janela ao Encerrar fica para depois. O disjuntor não foi exercitado contra o GSUS real nesta sessão -- só com fakes; a auditoria real acompanhada logo depois mostra se o GSUS respondeu.
+
+---
+
+## 2026-09-04 — Auditoria real acompanhada após a 1.3.0: login do GSUS não abriu o pop-up (2 tentativas); diagnóstico duplicado corrigido (DEC-118)
+
+**Auditoria acompanhada (pedido do usuário):** iniciada via `--auto-update` (mesmo fluxo da tarefa agendada) às 15:38 e de novo às 15:41, com a 1.3.0 instalada. Nas duas: modelo pronto em ~8 s, sessão do Firefox aberta (`headless=False`), e `GSUSLoginError: pop-up do sistema não abriu dentro do tempo esperado` ~35 s depois. O login tinha funcionado às 11:55 e às 14:30 no mesmo dia -- instabilidade do GSUS no horário (ou throttling após vários logins no dia), não regressão: DEC-117 não toca o login. Nenhuma nova tentativa automática foi feita para não insistir em logins contra o sistema do hospital. O disjuntor da DEC-117 continua sem exercício real (a execução nem chegou ao censo).
+
+**Achado e correção (DEC-118):** na 1ª tentativa o diagnóstico `FALHA_GSUS` foi gravado DUAS vezes (26 ms de diferença) e "Sessão GSUS encerrada" não apareceu no log: `GSUSClient.__exit__` fechava contexto/navegador sem proteção, e a exceção do fechamento substituiu a `GSUSLoginError` original (perdendo a marca `_gsus_diagnostic_written`). Cada etapa do encerramento virou best-effort com aviso no log (só o nome da classe, DEC-082). +2 testes. Correção commitada, **instalador NÃO regenerado** (a 1.3.0 instalada não a inclui) -- fica para o próximo ciclo de build.
+
+**Nota sobre o método:** duas tentativas de acionar "Atualizar agora" por clique sintetizado na janela (localizando o botão laranja numa captura) não chegaram ao programa e foram abandonadas -- não há como garantir em qual janela um clique de tela cai. `--auto-update` é o caminho verificável.
+
+**Pendente:** tentar a auditoria mais tarde (ou o usuário conferir o login do GSUS manualmente no Firefox, como no DEC-077); rebuild/reinstall com DEC-118; push.

@@ -67,13 +67,39 @@ class GSUSClient:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        # DEC-118 (achado real 2026-09-04, log de produção): quando o login
+        # falhou (pop-up não abriu), fechar o contexto/navegador também
+        # lançou -- e uma exceção levantada dentro de `__exit__` SUBSTITUI a
+        # exceção original que estava subindo. Efeitos vistos: o
+        # `update_flow` perdeu a marca `_gsus_diagnostic_written` da
+        # `GSUSLoginError` e gravou um SEGUNDO diagnóstico idêntico, e
+        # "Sessão GSUS encerrada" nunca foi logado. Cada etapa passa a ser
+        # best-effort: só o nome da classe vai pro log (a mensagem de erro do
+        # Playwright pode carregar HTML/atributos de página -- DEC-082).
+        for label, action in (
+            ("contexto", self._close_context),
+            ("navegador", self._close_browser),
+            ("playwright", self._stop_playwright),
+        ):
+            try:
+                action()
+            except Exception as close_exc:  # nunca mascarar a exceção original
+                logger.warning(
+                    "Falha ao encerrar %s da sessão GSUS (%s) -- seguindo", label, type(close_exc).__name__,
+                )
+        logger.info("Sessão GSUS encerrada")
+
+    def _close_context(self) -> None:
         if self._context is not None:
             self._context.close()
+
+    def _close_browser(self) -> None:
         if self._browser is not None:
             self._browser.close()
+
+    def _stop_playwright(self) -> None:
         if self._playwright is not None:
             self._playwright.stop()
-        logger.info("Sessão GSUS encerrada")
 
     def goto(self, path: str = "") -> None:
         assert self.page is not None, "GSUSClient deve ser usado como context manager"

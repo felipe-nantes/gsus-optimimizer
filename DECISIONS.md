@@ -2212,3 +2212,13 @@ Assimetria de risco deliberada: um falso positivo aqui (tratar um censo genuinam
 **Verificação:** +11 testes (records ×3, adapter ×2, E2E ×3, diagnóstico ×2, UI ×1), suíte inteira aprovada; instalador 120,0 MB, SHA-256 `85A908F254AB2A12B5182EDD0B0378E924A7DC447DA188E2058B7E105796C717`. Não exercitado contra o GSUS real nesta sessão (só fakes) -- a primeira auditoria real após a instalação é o teste de aceitação.
 
 **Impacto:** `app/gsus/records.py` (classe + contagem), `app/gsus/adapter.py` (`reset_session`), `app/orchestrator.py` (constantes, contador, status `ABORTED_GSUS`), `app/analysis/run_diagnosis.py` (padrão conhecido + `describe_gsus_unresponsive_run`), `app/ui/main_window.py` (status), `installer/gsus-auditoria.iss` (1.3.0), testes. Sem mudança de schema, regras clínicas ou extração de dias.
+
+---
+
+## DEC-118 — `GSUSClient.__exit__` best-effort: fechar o navegador nunca substitui a exceção original
+
+**Achado (2026-09-04, log de produção):** com o login falhando (pop-up não abriu), `context.close()` também lançou. Uma exceção levantada dentro de `__exit__` substitui a que estava subindo -- o `update_flow` recebeu um `PlaywrightError` sem a marca `_gsus_diagnostic_written` e gravou um segundo diagnóstico `FALHA_GSUS` idêntico; "Sessão GSUS encerrada" nunca foi logado. Na tentativa seguinte, com fechamento normal, um só diagnóstico e o log completo -- confirmando a causa.
+
+**Decisão:** cada etapa (contexto, navegador, playwright) roda em `try/except` próprio, seguindo para a próxima e logando só `type(exc).__name__` (mensagens do Playwright podem carregar HTML de página, DEC-082). O `__exit__` nunca levanta. Testes: exceção original preservada com fechamento falho; fechamento falho sem exceção no corpo também não levanta.
+
+**Impacto:** `app/gsus/client.py`, `tests/unit/test_gsus_client.py`. Sem rebuild nesta decisão.
