@@ -297,3 +297,65 @@ def test_collect_days_raises_record_error_not_no_admission_on_frame_detached():
 
     with pytest.raises(GSUSRecordError):
         _collect_days(_FakeEvaluatePage(), deadline=0.0)
+
+
+# ------------------------------------------------------- DEC-117: busca sem responder
+
+def test_open_current_admission_raises_unresponsive_when_menu_never_responds(monkeypatch):
+    """DEC-117 (achado real 2026-09-04): 44 pacientes seguidos morreram JA no
+    menu (busca nunca disparada) com a mensagem generica de "nenhuma
+    internacao encontrada". Quando NENHUMA tentativa passa do menu, a causa e
+    o GSUS/sessao, nao o paciente -- precisa sair como classe propria pra o
+    orchestrator poder refazer o login e, persistindo, interromper."""
+    click_attempts = {"n": 0}
+
+    def fake_click_menu(page):
+        click_attempts["n"] += 1
+        return False  # menu nunca responde
+
+    monkeypatch.setattr(records, "_click_menu_to_search_screen", fake_click_menu)
+    monkeypatch.setattr(
+        records, "_submit_search", lambda page, record_number: pytest.fail("busca nao deveria ser disparada"),
+    )
+    monkeypatch.setattr(records, "_snapshot_pages", lambda page: frozenset())
+
+    with pytest.raises(records.GSUSSearchUnresponsiveError) as excinfo:
+        open_current_admission(object(), "123456")
+
+    assert click_attempts["n"] == SEARCH_RETRY_ATTEMPTS
+    assert "não respondeu" in str(excinfo.value)
+    assert "Nenhuma internação" not in str(excinfo.value)
+
+
+def test_open_current_admission_keeps_generic_error_when_menu_works_but_marker_never_appears(monkeypatch):
+    """Contraprova: se o menu respondeu (busca disparada) e so o marcador nao
+    apareceu, continua sendo o GSUSRecordError generico -- pode ser paciente
+    sem internacao atual, nao e sinal de GSUS fora do ar."""
+    monkeypatch.setattr(records, "_click_menu_to_search_screen", lambda page: True)
+    monkeypatch.setattr(records, "_submit_search", lambda page, record_number: _FakeNeverFoundResultPage())
+    monkeypatch.setattr(records, "_snapshot_pages", lambda page: frozenset())
+
+    with pytest.raises(GSUSRecordError) as excinfo:
+        open_current_admission(object(), "123456")
+
+    assert not isinstance(excinfo.value, records.GSUSSearchUnresponsiveError)
+    assert "Nenhuma internação em andamento encontrada" in str(excinfo.value)
+
+
+def test_open_current_admission_mixed_failures_are_not_unresponsive(monkeypatch):
+    """Se ao menos uma tentativa passou do menu, o GSUS respondeu de algum
+    jeito -- nao dispara o disjuntor."""
+    attempts = {"n": 0}
+
+    def fake_click_menu(page):
+        attempts["n"] += 1
+        return attempts["n"] == 1  # so a primeira passa do menu
+
+    monkeypatch.setattr(records, "_click_menu_to_search_screen", fake_click_menu)
+    monkeypatch.setattr(records, "_submit_search", lambda page, record_number: _FakeNeverFoundResultPage())
+    monkeypatch.setattr(records, "_snapshot_pages", lambda page: frozenset())
+
+    with pytest.raises(GSUSRecordError) as excinfo:
+        open_current_admission(object(), "123456")
+
+    assert not isinstance(excinfo.value, records.GSUSSearchUnresponsiveError)

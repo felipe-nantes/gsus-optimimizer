@@ -793,10 +793,17 @@ class MainWindow:
                     self.status_label.config(text=payload)
                 elif kind == "done":
                     counts = payload.counts
-                    if getattr(payload, "status", "COMPLETED") == "CANCELLED":
+                    result_status = getattr(payload, "status", "COMPLETED")
+                    if result_status == "CANCELLED":
                         self.status_label.config(
                             text=f"Interrompida pelo usuário — {counts['completed']}/{counts['found']} pacientes "
                             "processados nesta execução (o restante fica para a próxima)."
+                        )
+                    elif result_status == "ABORTED_GSUS":
+                        # DEC-117: disjuntor de GSUS sem responder.
+                        self.status_label.config(
+                            text=f"Interrompida: o GSUS parou de responder à busca de prontuário — "
+                            f"{counts['completed']}/{counts['found']} pacientes processados. Tente mais tarde."
                         )
                     else:
                         self.status_label.config(

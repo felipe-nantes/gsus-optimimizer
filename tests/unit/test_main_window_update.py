@@ -4,6 +4,7 @@ sem GSUS real. Só UM tk.Tk() por teste (ver test_app_shell.py sobre
 múltiplas instâncias serem instáveis no processo)."""
 import os
 import sys
+import threading
 import time
 import tkinter as tk
 
@@ -271,8 +272,11 @@ def test_update_flow_maps_not_implemented_error_to_friendly_message(tmp_path, mo
 # ------------------------------------------------------------ UI-006
 
 class FakeAdapterSlowThreePatients:
-    """Tres pacientes, cada extracao leva ~0,3 s -- tempo suficiente pro teste
-    clicar "Encerrar" no meio do 1o paciente."""
+    """Tres pacientes; a extracao do 1o sinaliza `started` e demora ~0,6 s --
+    o teste espera esse sinal (nao um texto de status, que pode ser
+    sobrescrito no mesmo ciclo de poll) e so entao clica "Encerrar"."""
+
+    started = threading.Event()
 
     def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None):
         pass
@@ -281,7 +285,8 @@ class FakeAdapterSlowThreePatients:
         return [Patient(record_number=r, bed="2A", unit="Clínica Médica") for r in ("100", "200", "300")]
 
     def get_raw_notes_text(self, patient, known_days=frozenset()):
-        time.sleep(0.3)
+        FakeAdapterSlowThreePatients.started.set()
+        time.sleep(0.6)
         return "20/08/2026 08:00 - Clinica Medica - Evolucao\nPaciente estavel, sem pendencias."
 
 
@@ -304,6 +309,7 @@ def test_cancel_button_stops_update_after_current_patient(tmp_path, monkeypatch)
     monkeypatch.setattr(gsus_client_module, "GSUSClient", FakeClient)
     monkeypatch.setattr(gsus_adapter_module, "GSUSAdapter", FakeAdapterSlowThreePatients)
 
+    FakeAdapterSlowThreePatients.started.clear()
     root = tk.Tk()
     try:
         window = MainWindow(root, _cfg_without_llm())
@@ -315,10 +321,10 @@ def test_cancel_button_stops_update_after_current_patient(tmp_path, monkeypatch)
         assert window.browser_switch.is_enabled() is False  # escolha so vale na proxima
 
         deadline = time.monotonic() + 5
-        while "Processando paciente 1 de 3" not in window.status_label["text"] and time.monotonic() < deadline:
+        while not FakeAdapterSlowThreePatients.started.is_set() and time.monotonic() < deadline:
             root.update()
             time.sleep(0.02)
-        assert "Processando paciente 1 de 3" in window.status_label["text"]
+        assert FakeAdapterSlowThreePatients.started.is_set()  # 1o paciente em coleta agora
 
         window._on_cancel_update()
         assert "Encerrando" in window.status_label["text"]
@@ -410,5 +416,43 @@ def test_error_in_background_mode_adds_hint_to_switch_back(tmp_path, monkeypatch
         status_text = window.status_label["text"]
         assert "Navegador visível" in status_text
         assert "Traceback" not in status_text
+    finally:
+        root.destroy()
+
+
+def test_gsus_unresponsive_breaker_shows_clear_status(tmp_path, monkeypatch):
+    """DEC-117: quando o disjuntor interrompe, a tela diz que foi o GSUS, nao
+    o programa, e quantos pacientes ficaram."""
+    from app.gsus import adapter as gsus_adapter_module
+    from app.gsus import client as gsus_client_module
+    from app.gsus.records import GSUSSearchUnresponsiveError
+
+    class FakeAdapterUnresponsive:
+        def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None):
+            pass
+
+        def get_census(self):
+            return [Patient(record_number=str(100 + i), bed="2A", unit="Clínica Médica") for i in range(7)]
+
+        def reset_session(self):
+            pass
+
+        def get_raw_notes_text(self, patient, known_days=frozenset()):
+            raise GSUSSearchUnresponsiveError("simulado: tela de busca não respondeu em 5 tentativas")
+
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(credentials, "get_credential", lambda name: ("11122233344", "senha"))
+    monkeypatch.setattr(gsus_client_module, "GSUSClient", FakeClient)
+    monkeypatch.setattr(gsus_adapter_module, "GSUSAdapter", FakeAdapterUnresponsive)
+
+    root = tk.Tk()
+    try:
+        window = MainWindow(root, _cfg_without_llm())
+        window._on_update()
+        _pump_until_done(root, window)
+        status_text = window.status_label["text"]
+        assert "GSUS parou de responder" in status_text
+        assert "0/7" in status_text
+        assert str(window.update_button["state"]) == "normal"
     finally:
         root.destroy()

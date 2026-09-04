@@ -214,3 +214,21 @@ def test_cancelled_run_is_described_as_user_action_not_failure():
     assert needs_attention is False
     assert "3 de 80" in summary
     assert "encerrada pelo usuário" in summary.lower()
+
+
+# ------------------------------------------ DEC-117: GSUS sem responder a busca
+def test_search_unresponsive_error_is_a_known_gsus_cause():
+    assert run_diagnosis.is_known_gsus_error(
+        "GSUSSearchUnresponsiveError: A tela de busca de prontuário não respondeu em 5 tentativas"
+    )
+
+
+def test_gsus_unresponsive_run_is_described_as_gsus_failure_needing_attention():
+    outcome, summary, needs_attention = run_diagnosis.describe_gsus_unresponsive_run(
+        found=183, completed=6, consecutive_failures=6, relogin_attempted=True,
+    )
+    assert outcome == run_diagnosis.OUTCOME_FALHA_GSUS
+    assert needs_attention is True
+    assert "6 paciente(s) seguido(s)" in summary
+    assert "6 de 183" in summary
+    assert "refazer o login" in summary

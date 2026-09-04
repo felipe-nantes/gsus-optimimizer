@@ -28,7 +28,7 @@ from app.extraction.hashing import compute_note_hash
 from app.extraction.normalizer import normalize_datetime, normalize_text
 from app.extraction.parser import parse_note_blocks
 from app.gsus.census import GSUSCensusIncompleteError
-from app.gsus.records import GSUSNoCurrentAdmissionDays
+from app.gsus.records import GSUSNoCurrentAdmissionDays, GSUSSearchUnresponsiveError
 from app.models import Note, Patient
 from app.reports import dashboard_metrics
 from app.reports.html_report import generate_report
@@ -72,6 +72,22 @@ MAX_NOTES_CHARS_FOR_LLM = 9000
 # tratado como indisponibilidade real.
 MAX_CONSECUTIVE_UNHEALTHY_CHECKS = 2
 
+# DEC-117 (achado real 2026-09-04): numa execução de 183 pacientes, a tela
+# de busca de prontuário do GSUS parou de responder às 12:00 e ficou assim
+# por 2 horas -- 44 pacientes seguidos esgotaram as 5 tentativas de 30s
+# (2,5 min cada, 110 min no total pra 3 sucessos), com a sessão ainda
+# "logada" (nenhum marcador de sessão expirada/aba crashada, DEC-083/084,
+# apareceu -- então `_ensure_login` nunca refez o login). Duas alavancas,
+# nesta ordem: depois de RELOGIN_AFTER pacientes seguidos com
+# `GSUSSearchUnresponsiveError`, pede ao adapter uma sessão nova
+# (`reset_session`, uma vez por sequência); persistindo até ABORT_AFTER,
+# interrompe a Fase 1 com diagnóstico claro em vez de moer a fila inteira.
+# Qualquer paciente que passe do menu (sucesso, sem internação, ou outro
+# erro) zera a contagem -- é sinal de que o GSUS voltou a responder.
+# 3 e 6 = ~7,5 min e ~15 min de espera no pior caso, contra 110 min reais.
+GSUS_UNRESPONSIVE_RELOGIN_AFTER = 3
+GSUS_UNRESPONSIVE_ABORT_AFTER = 6
+
 
 class CensusSource(Protocol):
     def get_census(self) -> list[Patient]: ...
@@ -97,9 +113,10 @@ class RunResult:
     run_id: str
     counts: dict
     report_path: Path
-    # UI-006 (2026-09-04): "COMPLETED" (rodou até o fim) ou "CANCELLED"
-    # (encerrada pelo usuário no meio, via `cancel_event`). Nunca "FAILED" --
-    # falha continua sendo exceção, não resultado.
+    # UI-006 (2026-09-04): "COMPLETED" (rodou até o fim), "CANCELLED"
+    # (encerrada pelo usuário no meio, via `cancel_event`) ou "ABORTED_GSUS"
+    # (DEC-117: Fase 1 interrompida pelo disjuntor de GSUS sem responder).
+    # Nunca "FAILED" -- falha continua sendo exceção, não resultado.
     status: str = "COMPLETED"
 
 
@@ -231,6 +248,10 @@ def run_once(
         backlog_tasks: list[tuple[str, list[StructuredNote], bool]] = []
         # UI-006: vira True quando o usuário clica "Encerrar" no meio da Fase 1.
         run_cancelled = False
+        # DEC-117: disjuntor de GSUS sem responder (ver constantes no topo).
+        gsus_unresponsive = False
+        consecutive_unresponsive = 0
+        relogin_attempted = False
         if llm is not None:
             llm_worker_thread = threading.Thread(
                 target=_llm_phase2_worker,
@@ -305,6 +326,8 @@ def run_once(
                 try:
                     llm_input = _process_patient_rules(repo, patients_by_id[patient_id], patient_id, record_source)
                     repo.mark_done(run_id, patient_id)
+                    consecutive_unresponsive = 0
+                    relogin_attempted = False
                     if llm is not None and llm_input is not None:
                         llm_notes, window_limited = llm_input
                         queued_patient_ids.add(patient_id)
@@ -315,11 +338,48 @@ def run_once(
                     # Categoria separada no relatório, decisão do usuário -- ver
                     # DEC-054.
                     repo.mark_no_admission(run_id, patient_id)
+                    consecutive_unresponsive = 0
+                    relogin_attempted = False
+                except GSUSSearchUnresponsiveError as exc:
+                    # DEC-117: a busca nem chegou a ser disparada -- causa é o
+                    # GSUS/sessão, não o paciente. Continua isolado por paciente
+                    # (RF-12), mas alimenta o disjuntor.
+                    logger.error(
+                        "Tela de busca do GSUS não respondeu para o paciente %s (%d seguido(s))",
+                        pseudonym.for_log(patient_id), consecutive_unresponsive + 1,
+                    )
+                    repo.mark_error(run_id, patient_id, _safe_error_text(exc))
+                    consecutive_unresponsive += 1
+                    if consecutive_unresponsive >= GSUS_UNRESPONSIVE_ABORT_AFTER:
+                        gsus_unresponsive = True
+                        report(
+                            f"Interrompendo: o GSUS não responde à busca de prontuário há "
+                            f"{consecutive_unresponsive} pacientes seguidos -- o restante fica para a próxima atualização."
+                        )
+                        break
+                    if consecutive_unresponsive >= GSUS_UNRESPONSIVE_RELOGIN_AFTER and not relogin_attempted:
+                        relogin_attempted = True
+                        reset_session = getattr(record_source, "reset_session", None)
+                        if reset_session is not None:
+                            report(
+                                f"GSUS sem responder há {consecutive_unresponsive} pacientes seguidos -- "
+                                "refazendo o login antes de continuar..."
+                            )
+                            try:
+                                reset_session()
+                            except Exception:
+                                logger.exception("Falha ao refazer o login do GSUS após falhas seguidas na busca")
                 except Exception as exc:  # isolamento de falha por paciente -- RF-12
                     logger.exception("Falha ao processar paciente %s", pseudonym.for_log(patient_id))
                     repo.mark_error(run_id, patient_id, _safe_error_text(exc))
+                    # Outro erro = o GSUS respondeu de algum jeito; zera o disjuntor.
+                    consecutive_unresponsive = 0
+                    relogin_attempted = False
 
-            final_status = "CANCELLED" if run_cancelled else "COMPLETED"
+            # DEC-117: interrompido pelo disjuntor conta como FAILED no banco
+            # (a Fase 1 não terminou), mas devolve resultado em vez de exceção.
+            stopped_early = run_cancelled or gsus_unresponsive
+            final_status = "CANCELLED" if run_cancelled else ("FAILED" if gsus_unresponsive else "COMPLETED")
             try:
                 repo.finish_run(run_id, final_status)
             except Exception:
@@ -335,16 +395,16 @@ def run_once(
                 logger.exception(
                     "Falha ao marcar run como COMPLETED -- Fase 1 já persistiu tudo, seguindo mesmo assim"
                 )
-            if run_cancelled:
-                # UI-006: encerrado pelo usuário -- NÃO regrava o relatório do
-                # dia com uma fatia parcial (o anterior, completo, continua
-                # valendo), não enfileira backlog pra IA (abaixo) e derruba na
-                # hora a análise por IA que estiver em andamento: sem isto, o
-                # botão só responderia depois de a análise atual terminar (até
-                # minutos em CPU). A thread da Fase 2 trata a falha da chamada
-                # como qualquer outra (isolada por paciente) e, vendo o evento
-                # setado, descarta o resto da fila -- nada fica marcado como
-                # analisado sem ter terminado.
+            if stopped_early:
+                # UI-006/DEC-117: encerrado pelo usuário ou pelo disjuntor de GSUS
+                # -- NÃO regrava o relatório do dia com uma fatia parcial (o
+                # anterior, completo, continua valendo), não enfileira backlog
+                # pra IA (abaixo) e derruba na hora a análise por IA que
+                # estiver em andamento: sem isto, o botão só responderia depois
+                # de a análise atual terminar (até minutos em CPU). A thread da
+                # Fase 2 trata a falha da chamada como qualquer outra (isolada
+                # por paciente) e, vendo o evento/sentinela, descarta o resto da
+                # fila -- nada fica marcado como analisado sem ter terminado.
                 if llm is not None and hasattr(llm, "stop"):
                     try:
                         llm.stop()
@@ -389,8 +449,8 @@ def run_once(
             # abaixo: ele SEMPRE roda antes da exceção continuar subindo,
             # então o sentinela/join da thread da Fase 2 nunca deixam de
             # acontecer só porque o backlog explodiu.
-            # UI-006: sem backlog quando encerrado pelo usuário.
-            for pending_patient_id in ([] if run_cancelled else repo.get_active_patients_pending_ai_analysis()):
+            # UI-006/DEC-117: sem backlog quando interrompido antes do fim.
+            for pending_patient_id in ([] if stopped_early else repo.get_active_patients_pending_ai_analysis()):
                 if pending_patient_id in queued_patient_ids:
                     continue
                 backlog_notes = _reconstruct_all_notes(repo, pending_patient_id)
@@ -404,7 +464,7 @@ def run_once(
                 for task in backlog_tasks:
                     llm_queue.put(task)
                 llm_queue.put(_LLM_QUEUE_DONE)
-                if run_cancelled:
+                if stopped_early:
                     report("Encerrando a análise por IA...")
                 else:
                     report("Aguardando a análise por IA (já em andamento em paralelo desde a Fase 1) terminar a fila...")
@@ -436,7 +496,7 @@ def run_once(
         # mesmo motivo de `generate_report` acima: uma falha aqui (disco
         # cheio, etc.) não pode jogar fora uma execução que já persistiu
         # tudo o que importa em `patient_state`/`pending_items`.
-        if not run_cancelled:  # UI-006: retrato parcial do dia poluiria a tendência
+        if not stopped_early:  # UI-006/DEC-117: retrato parcial do dia poluiria a tendência
             try:
                 dashboard_metrics.save_snapshot(repo, run_id)
             except Exception:
@@ -455,6 +515,11 @@ def run_once(
                 outcome, summary, needs_attention = run_diagnosis.describe_cancelled_run(
                     found=final_counts["found"], completed=final_counts["completed"],
                 )
+            elif gsus_unresponsive:
+                outcome, summary, needs_attention = run_diagnosis.describe_gsus_unresponsive_run(
+                    found=final_counts["found"], completed=final_counts["completed"],
+                    consecutive_failures=consecutive_unresponsive, relogin_attempted=relogin_attempted,
+                )
             else:
                 outcome, summary, needs_attention = run_diagnosis.classify_completed_run(
                     found=final_counts["found"],
@@ -472,6 +537,12 @@ def run_once(
             return RunResult(
                 run_id=run_id, counts=repo.get_run_counts(run_id), report_path=report_output_path,
                 status="CANCELLED",
+            )
+        if gsus_unresponsive:
+            report("Interrompido: o GSUS parou de responder.")
+            return RunResult(
+                run_id=run_id, counts=repo.get_run_counts(run_id), report_path=report_output_path,
+                status="ABORTED_GSUS",
             )
         report("Concluído.")
         return RunResult(run_id=run_id, counts=repo.get_run_counts(run_id), report_path=report_output_path)

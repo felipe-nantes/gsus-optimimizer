@@ -196,6 +196,18 @@ class GSUSNoCurrentAdmissionDays(GSUSRecordError):
     DECISIONS.md DEC-054."""
 
 
+class GSUSSearchUnresponsiveError(GSUSRecordError):
+    """A tela de busca de prontuário (menu Atendimento → Pesquisar
+    Prontuário) não respondeu em NENHUMA das tentativas -- a busca nem
+    chegou a ser disparada. Diferente de "marcador não apareceu" (que pode
+    ser paciente genuinamente sem internação atual), aqui o sinal é GSUS
+    lento/instável ou sessão degradada. Achado real 2026-09-04 (DEC-117):
+    44 pacientes seguidos falharam assim, 2,5 min cada, mascarados pela
+    mensagem genérica de "nenhuma internação encontrada" -- o orchestrator
+    usa esta classe pra refazer o login e, persistindo, interromper a
+    execução em vez de gastar horas."""
+
+
 # DEC-102: 3 não bastou numa instabilidade real do GSUS/máquina lenta --
 # achado ao vivo 2026-09-01 (execução real, RESIL-008): 21 de 23 pacientes
 # tentados falharam aqui em sequência (marcador nunca apareceu dentro de
@@ -289,8 +301,12 @@ def open_current_admission(page: Frame | Page, record_number: str) -> Frame | Pa
     novo -- recarregando a tela de busca do zero -- se esse sinal não
     aparecer dentro do prazo."""
     existing_pages = _snapshot_pages(page)
+    # DEC-117: conta quantas tentativas morreram JÁ no menu (busca nunca
+    # disparada) pra distinguir "GSUS não responde" de "marcador não apareceu".
+    menu_failures = 0
     for attempt in range(1, SEARCH_RETRY_ATTEMPTS + 1):
         if not _click_menu_to_search_screen(page):
+            menu_failures += 1
             logger.warning("Menu 'Atendimento'/'Pesquisar Prontuário' não respondeu ao "
                             "clique (tentativa %d/%d).", attempt, SEARCH_RETRY_ATTEMPTS)
             continue
@@ -346,6 +362,13 @@ def open_current_admission(page: Frame | Page, record_number: str) -> Frame | Pa
             continue
         return result_page
 
+    if menu_failures == SEARCH_RETRY_ATTEMPTS:
+        # DEC-117: nenhuma tentativa passou do menu -- não há como saber se o
+        # paciente tem internação atual; a causa é o GSUS/sessão, não o paciente.
+        raise GSUSSearchUnresponsiveError(
+            f"A tela de busca de prontuário não respondeu em {SEARCH_RETRY_ATTEMPTS} tentativas "
+            "(menu Atendimento/Pesquisar Prontuário) -- GSUS lento, instável ou sessão degradada."
+        )
     raise GSUSRecordError(
         f"Nenhuma internação em andamento encontrada após "
         f"{SEARCH_RETRY_ATTEMPTS} tentativas (marcador '{CURRENT_ADMISSION_MARKER}' não apareceu)."

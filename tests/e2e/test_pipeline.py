@@ -896,3 +896,118 @@ def test_pipeline_without_cancel_event_still_completes_normally(tmp_path):
     assert result.status == "COMPLETED"
     assert result.counts["completed"] == 2
     conn.close()
+
+
+# ------------------------------------------------ DEC-117: disjuntor de GSUS sem responder
+
+from app.gsus.records import GSUSSearchUnresponsiveError  # noqa: E402
+
+
+class UnresponsiveSearchRecordSource(FixtureRecordSource):
+    """Simula a tela de busca do GSUS sem responder: levanta
+    `GSUSSearchUnresponsiveError` em toda chamada (ou ate o primeiro
+    `reset_session`, se `recover_after_reset`) e registra cada reset pedido
+    pelo orchestrator."""
+
+    def __init__(self, fixture_by_record_number, recover_after_reset=False):
+        super().__init__(fixture_by_record_number)
+        self.recover_after_reset = recover_after_reset
+        self.calls = 0
+        self.resets = 0
+
+    def reset_session(self):
+        self.resets += 1
+
+    def get_raw_notes_text(self, patient: Patient, known_days=frozenset()) -> str:
+        self.calls += 1
+        if self.recover_after_reset and self.resets > 0:
+            return super().get_raw_notes_text(patient, known_days)
+        raise GSUSSearchUnresponsiveError("simulado: tela de busca não respondeu em 5 tentativas")
+
+
+def _many_patients(n: int) -> list[Patient]:
+    return [Patient(record_number=str(1000 + i), bed=f"{i}A", unit=UNIT) for i in range(n)]
+
+
+def test_pipeline_gsus_unresponsive_relogs_after_3_and_aborts_after_6(tmp_path):
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    patients = _many_patients(9)
+    records = UnresponsiveSearchRecordSource({p.record_number: "awaiting_exam.txt" for p in patients})
+    llm = StoppableStubLLM()
+    report_path = tmp_path / "relatorio.html"
+
+    result = run_once(repo, FixtureCensusSource(patients), records, UNIT, report_path, llm=llm)
+
+    assert result.status == "ABORTED_GSUS"
+    assert records.calls == 6  # parou no sexto paciente seguido, nao moeu os 9
+    assert records.resets == 1  # re-login pedido uma vez, depois do terceiro
+    assert result.counts == {"found": 9, "completed": 0, "failed": 6, "no_admission": 0}
+    run_row = conn.execute("SELECT status FROM runs WHERE run_id = ?", (result.run_id,)).fetchone()
+    assert run_row["status"] == "FAILED"
+    pending = conn.execute(
+        "SELECT COUNT(*) AS n FROM processing_queue WHERE run_id = ? AND status = 'PENDING'",
+        (result.run_id,),
+    ).fetchone()["n"]
+    assert pending == 3
+    assert llm.stopped is True
+    assert not report_path.exists()
+    assert conn.execute("SELECT COUNT(*) AS n FROM daily_snapshot").fetchone()["n"] == 0
+    diagnostic = repo.get_latest_run_diagnostic()
+    assert diagnostic["outcome"] == run_diagnosis.OUTCOME_FALHA_GSUS
+    assert diagnostic["needs_attention"]
+    assert "6 paciente(s) seguido(s)" in diagnostic["summary"]
+    assert "refazer o login" in diagnostic["summary"]
+    # cada erro por paciente e reconhecido como causa conhecida do GSUS
+    assert all(run_diagnosis.is_known_gsus_error(e) for e in repo.get_error_messages_for_run(result.run_id))
+    assert not any(t.name == "llm-phase2-worker" and t.is_alive() for t in threading.enumerate())
+    conn.close()
+
+
+def test_pipeline_gsus_unresponsive_recovers_after_relogin_and_completes(tmp_path):
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    patients = _many_patients(6)
+    records = UnresponsiveSearchRecordSource(
+        {p.record_number: "awaiting_exam.txt" for p in patients}, recover_after_reset=True,
+    )
+
+    result = run_once(repo, FixtureCensusSource(patients), records, UNIT, tmp_path / "relatorio.html")
+
+    assert result.status == "COMPLETED"
+    assert records.resets == 1
+    assert result.counts["failed"] == 3  # os tres antes do re-login
+    assert result.counts["completed"] == 3
+    conn.close()
+
+
+def test_pipeline_gsus_unresponsive_streak_resets_when_another_error_type_interleaves(tmp_path):
+    """5 sem responder, 1 erro de outro tipo (GSUS respondeu), 5 sem responder:
+    nunca chega a 6 seguidos -- nao aborta; re-login pedido a cada sequencia."""
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    patients = _many_patients(11)
+
+    class InterleavedSource(FixtureRecordSource):
+        def __init__(self):
+            super().__init__({})
+            self.calls = 0
+            self.resets = 0
+
+        def reset_session(self):
+            self.resets += 1
+
+        def get_raw_notes_text(self, patient: Patient, known_days=frozenset()) -> str:
+            self.calls += 1
+            if self.calls == 6:
+                raise TimeoutError("simulado: outro tipo de erro")
+            raise GSUSSearchUnresponsiveError("simulado: tela de busca não respondeu em 5 tentativas")
+
+    records = InterleavedSource()
+    result = run_once(repo, FixtureCensusSource(patients), records, UNIT, tmp_path / "relatorio.html")
+
+    assert result.status == "COMPLETED"
+    assert records.calls == 11
+    assert records.resets == 2
+    assert result.counts["failed"] == 11
+    conn.close()

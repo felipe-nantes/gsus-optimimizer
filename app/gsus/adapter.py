@@ -140,6 +140,22 @@ class GSUSAdapter:
         except PlaywrightError:
             pass
 
+    def reset_session(self) -> None:
+        """DEC-117 (achado real 2026-09-04): refaz o login numa aba nova
+        MESMO sem o marcador de sessão expirada -- chamado pelo orchestrator
+        depois de `GSUS_UNRESPONSIVE_RELOGIN_AFTER` pacientes seguidos com a
+        tela de busca sem responder. Naquele dia a sessão continuava
+        "logada" (nenhum marcador do DEC-083/084 apareceu) e mesmo assim o
+        menu não respondeu por 2 horas; uma sessão nova é a única alavanca
+        que este programa tem antes de desistir. Sem login prévio não há o
+        que refazer -- `_ensure_login` cuida do primeiro login."""
+        if not self._logged_in:
+            return
+        logger.warning(
+            "Refazendo login no GSUS por falhas seguidas na tela de busca (sessão pode estar degradada)."
+        )
+        self._relogin()
+
     def get_census(self) -> list[Patient]:
         content_frame = self._ensure_login()
         return gsus_census.get_census(content_frame, self._unit)

@@ -54,6 +54,7 @@ KNOWN_GSUS_ERROR_PATTERNS = [
     "GSUSCensusIncompleteError",  # paginação do censo (DEC-080/096/108)
     "Não foi possível abrir/pesquisar a tela de censo",  # GSUSCensusError, DEC-105/RESIL-011
     "Nenhuma internação em andamento encontrada após",  # GSUSRecordError, marcador (DEC-102)
+    "GSUSSearchUnresponsiveError",  # tela de busca não respondeu em nenhuma tentativa (DEC-117)
     "Nenhuma evolução encontrada para extrair",  # GSUSRecordError
     "Nenhuma internação encontrada.",  # GSUSRecordError, DEC-025/026/034
     "Não foi possível listar os dias da internação (sessão instável)",  # GSUSRecordError, DEC-082
@@ -201,6 +202,29 @@ def describe_cancelled_run(found: int, completed: int) -> tuple[str, str, bool]:
         "antes da interrupção. Nada foi perdido: o que já foi processado está salvo e a "
         "próxima atualização (manual ou agendada) continua de onde parou.",
         False,
+    )
+
+
+def describe_gsus_unresponsive_run(
+    found: int, completed: int, consecutive_failures: int, relogin_attempted: bool,
+) -> tuple[str, str, bool]:
+    """DEC-117: o orchestrator interrompeu a Fase 1 porque a tela de busca de
+    prontuário do GSUS não respondeu por `consecutive_failures` pacientes
+    seguidos (cada um esgotando as tentativas), mesmo depois de refazer o
+    login. Instabilidade do GSUS, não defeito deste programa -- mas pede
+    atenção porque a cobertura do dia ficou incompleta."""
+    relogin_text = (
+        "mesmo depois de refazer o login automaticamente" if relogin_attempted
+        else "sem conseguir refazer o login automaticamente"
+    )
+    return (
+        OUTCOME_FALHA_GSUS,
+        f"O GSUS parou de responder à busca de prontuário por {consecutive_failures} paciente(s) "
+        f"seguido(s), {relogin_text}. A execução foi interrompida para não gastar horas em vão: "
+        f"{completed} de {found} paciente(s) foram processados e estão salvos; os demais ficam para a "
+        "próxima atualização. Instabilidade do sistema do hospital, não um defeito deste programa -- "
+        "tente de novo mais tarde.",
+        True,
     )
 
 

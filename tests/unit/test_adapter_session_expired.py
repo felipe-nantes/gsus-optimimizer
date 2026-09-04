@@ -220,3 +220,32 @@ def test_session_expired_false_when_content_frame_is_unavailable(monkeypatch):
     adapter = _make_adapter(page)
 
     assert adapter._session_expired() is False
+
+
+# ------------------------------------------------------------ DEC-117: reset_session
+
+def test_reset_session_relogs_even_without_expired_marker(monkeypatch):
+    """DEC-117: sessao "logada" mas o menu nao responde ha N pacientes -- o
+    orchestrator pede uma sessao nova mesmo sem marcador de expiracao."""
+    new_page = _FakePage()
+    old_page = _FakePage(context=_FakeContext(new_page))  # nenhum marcador presente
+    relogged_page = _FakePage()
+    monkeypatch.setattr(adapter_module.gsus_login, "login", lambda page, u, p: relogged_page)
+
+    adapter = _make_adapter(old_page)
+    adapter._logged_in = True
+    adapter.reset_session()
+
+    assert adapter._page is relogged_page
+    assert old_page.closed is True
+
+
+def test_reset_session_is_noop_before_first_login(monkeypatch):
+    monkeypatch.setattr(adapter_module.gsus_login, "login", lambda page, u, p: pytest.fail("nao deveria logar"))
+    page = _FakePage(context=_FakeContext(_FakePage()))
+    adapter = _make_adapter(page)
+
+    adapter.reset_session()
+
+    assert adapter._page is page
+    assert page.closed is False

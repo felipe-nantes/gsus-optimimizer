@@ -284,6 +284,8 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  `GSUSAuditoria-Setup.exe` 120,0 MB, SHA-256 00A95DAE...1F71 -- substitui o de DEC-114.
                  REGENERADO 1.2.0 (DEC-116, Encerrar + navegador visível/segundo plano): novo
                  `GSUSAuditoria-Setup.exe` 120,0 MB, SHA-256 2CB17C12...9718 -- substitui o de DEC-115.
+                 REGENERADO 1.3.0 (DEC-117, disjuntor de GSUS): novo `GSUSAuditoria-Setup.exe`
+                 120,0 MB, SHA-256 85A908F2...C717 -- substitui o de DEC-116.
 [x] E2E-001      Teste em máquina limpa (sem Python/Playwright/llama.cpp pré-instalados) --
                  marcado como não feito por muito tempo por engano: na prática, extensivamente
                  executado nesta máquina real desde 2026-08-26 (login headless, paginação de
@@ -597,6 +599,12 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  `GSUSClient(headless=...)`, `ToggleSwitch` em Canvas na barra de status. Padrão
                  visível (DEC-077). PENDENTE: validação REAL do modo segundo plano pelo usuário --
                  o GSUS já bloqueou navegador oculto antes; a tela sugere voltar se falhar.
+[x] RESIL-013    Disjuntor de GSUS sem responder à busca de prontuário (2026-09-04, DEC-117): classe
+                 própria `GSUSSearchUnresponsiveError` quando nenhuma tentativa passa do menu; re-login
+                 automático (`GSUSAdapter.reset_session`) após 3 pacientes seguidos; interrupção da
+                 Fase 1 após 6 (run FAILED, diagnóstico FALHA_GSUS com atenção, status
+                 `ABORTED_GSUS` na tela). Pior caso ~15 min em vez das 2 h reais do dia. +11 testes.
+                 PENDENTE: exercitar contra o GSUS real (só fakes nesta sessão).
 [x] REPORT-002   Relatório HTML alinhado à mesma referência visual (DEC-113): cartões arredondados,
                  hierarquia tipográfica, tabelas claras, tags e destaques laranja, responsivo
                  para telas menores. Prévia segura reproduzível em `scripts/preview_report.py`,
