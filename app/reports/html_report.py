@@ -30,55 +30,60 @@ ORIGIN_LABELS = {"INTERNA": "interna", "EXTERNA": "externa"}
 CONFIDENCE_LABELS = {"ALTA": "alta", "MEDIA": "média", "BAIXA": "baixa"}
 
 CSS = """
-body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; color: #1a1a1a; background: #f7f7f8; }
-h1 { font-size: 20px; margin-bottom: 4px; }
-.meta { color: #555; margin-bottom: 24px; }
-.summary { display: flex; gap: 24px; margin-bottom: 24px; flex-wrap: wrap; }
-.summary .stat { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 12px 20px; }
-.summary .stat .n { font-size: 24px; font-weight: bold; display: block; }
+:root { color-scheme: light; --canvas: #e9e9ec; --page: #f5f6f7; --card: #fff; --text: #111315; --muted: #71717a; --line: #eceef0; --accent: #ff4f0a; --accent-soft: #fff0e9; --success: #208442; }
+* { box-sizing: border-box; }
+html { background: var(--canvas); }
+body { max-width: 1440px; min-height: calc(100vh - 48px); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; margin: 24px auto; padding: 34px; color: var(--text); background: var(--page); border: 1px solid #dedfe2; border-radius: 24px; box-shadow: 0 14px 40px rgba(20, 20, 22, .07); }
+h1 { display: flex; align-items: center; gap: 12px; font-size: 28px; letter-spacing: -.03em; margin: 0 0 5px; }
+h1::before { content: ""; width: 22px; height: 22px; flex: 0 0 22px; border-radius: 6px; background: conic-gradient(from 90deg, var(--text) 0 25%, var(--accent) 0 50%, var(--text) 0 100%); box-shadow: inset 0 0 0 3px var(--page); }
+h2 { letter-spacing: -.015em; }
+.meta { color: var(--muted); font-size: 13px; margin-bottom: 25px; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.summary .stat { min-height: 104px; background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px 20px; color: var(--muted); font-size: 12px; }
+.summary .stat .n { color: var(--text); font-size: 34px; line-height: 1; letter-spacing: -.04em; font-weight: 650; display: block; margin-bottom: 10px; }
+.summary .stat.compact .n { font-size: 23px; line-height: 1.12; overflow-wrap: anywhere; }
 .summary .stat.failed .n { color: #b3261e; }
-.failures { background: #fff3f2; border: 1px solid #f2c9c5; border-radius: 8px; padding: 12px 16px; margin-bottom: 24px; }
-.failures h2 { font-size: 14px; margin: 0 0 8px 0; color: #b3261e; }
-.failures li { margin-bottom: 4px; }
-.no-admission { background: #f5f5f5; border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin-bottom: 24px; }
-.no-admission h2 { font-size: 14px; margin: 0 0 8px 0; color: #555; }
-.no-admission li { margin-bottom: 4px; }
-.census { margin-bottom: 32px; overflow-x: auto; }
-.census h2 { font-size: 16px; }
-.census table { border-collapse: collapse; width: 100%; background: #fff; }
-.census th, .census td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; font-size: 13px; }
-.census th { background: #333; color: #fff; }
+.failures, .no-admission { border-radius: 16px; padding: 15px 18px; margin-bottom: 20px; }
+.failures { background: #fff3f2; border: 1px solid #f2c9c5; }
+.no-admission { background: #f1f2f3; border: 1px solid var(--line); }
+.failures h2, .no-admission h2 { font-size: 14px; margin: 0 0 8px; }
+.failures h2 { color: #b3261e; }
+.no-admission h2 { color: var(--text); }
+.failures li, .no-admission li { margin-bottom: 4px; }
+.census, .indicators { margin-bottom: 30px; overflow-x: auto; }
+.census h2, .indicators h2 { font-size: 18px; margin: 0 0 12px; }
+.census table, .indicators table { border-collapse: separate; border-spacing: 0; width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.census th, .census td, .indicators th, .indicators td { border: 0; border-bottom: 1px solid var(--line); padding: 10px 12px; text-align: left; font-size: 12px; }
+.census tr:last-child td, .indicators tr:last-child td { border-bottom: 0; }
+.census th, .indicators th { background: #f0f1f2; color: #4c4d52; font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
 .prio-ALTA { color: #b3261e; font-weight: bold; }
-.prio-MEDIA { color: #b8860b; font-weight: bold; }
-.prio-MONITORAMENTO { color: #2e7d32; }
-.unit { margin-bottom: 32px; }
-.unit > h2 { font-size: 16px; border-bottom: 2px solid #333; padding-bottom: 4px; }
-.bed { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-.bed h3 { margin: 0 0 4px 0; font-size: 15px; }
-.bed .day-badge { display: inline-block; font-size: 11px; font-weight: bold; padding: 2px 8px; border-radius: 10px; margin-left: 8px; vertical-align: middle; }
-.day-badge.VERDE { background: #e6f4ea; color: #2e7d32; }
+.prio-MEDIA { color: #9b6b00; font-weight: bold; }
+.prio-MONITORAMENTO { color: var(--success); }
+.unit { margin-bottom: 30px; }
+.unit > h2 { font-size: 18px; border: 0; border-left: 4px solid var(--accent); padding: 2px 0 2px 12px; margin-bottom: 14px; }
+.bed { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px; margin-bottom: 12px; box-shadow: 0 5px 18px rgba(20, 20, 22, .03); }
+.bed h3 { margin: 0 0 5px; font-size: 15px; }
+.bed .day-badge { display: inline-block; font-size: 10px; font-weight: bold; padding: 3px 9px; border-radius: 999px; margin-left: 8px; vertical-align: middle; }
+.day-badge.VERDE { background: #e7f5eb; color: var(--success); }
 .day-badge.VERMELHO { background: #fce8e6; color: #b3261e; }
-.section-label { font-weight: bold; font-size: 12px; text-transform: uppercase; color: #555; margin-top: 12px; }
-.pending { border-left: 3px solid #b8860b; padding: 8px 12px; margin: 8px 0; background: #fffbea; }
-.pending .category { font-weight: bold; }
-.pending .evidence { font-style: italic; color: #444; margin-top: 4px; }
-.pending .evidence-date { color: #777; font-size: 12px; }
-.no-pending { color: #2e7d32; }
-.inferred-tag { font-size: 11px; color: #8a6d00; background: #fff3cd; border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
-.origin-tag { font-size: 11px; color: #555; background: #eee; border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
-.pending .meta-line { color: #777; font-size: 12px; margin-top: 2px; }
-.bed h3 .unit-label { font-size: 12px; font-weight: normal; color: #777; }
-.window-limited-warning { background: #fff3f2; border: 1px solid #f2c9c5; border-radius: 6px; padding: 8px 12px; margin: 8px 0; color: #7a2620; font-size: 13px; }
-.indicators { margin-bottom: 32px; overflow-x: auto; }
-.indicators h2 { font-size: 16px; }
-.indicators-breakdown { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 16px; }
-.indicators-breakdown .block { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; min-width: 200px; }
-.indicators-breakdown .block h3 { font-size: 13px; margin: 0 0 8px 0; color: #555; }
-.indicators-breakdown .block ul { margin: 0; padding-left: 18px; font-size: 13px; }
-.indicators-breakdown .block li { margin-bottom: 2px; }
-.indicators table { border-collapse: collapse; width: 100%; background: #fff; }
-.indicators th, .indicators td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; font-size: 13px; }
-.indicators th { background: #333; color: #fff; }
+.section-label { font-weight: bold; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin-top: 14px; }
+.pending { border-left: 4px solid var(--accent); border-radius: 0 12px 12px 0; padding: 10px 13px; margin: 9px 0; background: var(--accent-soft); }
+.pending .category { font-weight: 650; }
+.pending .evidence { font-style: italic; color: #44464b; margin-top: 5px; }
+.pending .evidence-date { color: var(--muted); font-size: 11px; }
+.no-pending { color: var(--success); }
+.inferred-tag, .origin-tag { display: inline-block; font-size: 10px; border-radius: 999px; padding: 2px 7px; margin-left: 6px; }
+.inferred-tag { color: #8a5e00; background: #fff3cd; }
+.origin-tag { color: #4c4d52; background: #eeeff1; }
+.pending .meta-line { color: var(--muted); font-size: 11px; margin-top: 3px; }
+.bed h3 .unit-label { font-size: 12px; font-weight: normal; color: var(--muted); }
+.window-limited-warning { background: #fff3f2; border: 1px solid #f2c9c5; border-radius: 12px; padding: 10px 13px; margin: 9px 0; color: #7a2620; font-size: 12px; }
+.indicators-breakdown { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.indicators-breakdown .block { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; min-width: 0; }
+.indicators-breakdown .block h3 { font-size: 12px; margin: 0 0 8px; color: var(--muted); }
+.indicators-breakdown .block ul { margin: 0; padding-left: 18px; font-size: 12px; }
+.indicators-breakdown .block li { margin-bottom: 3px; }
+@media (max-width: 760px) { body { margin: 0; padding: 20px; border: 0; border-radius: 0; } h1 { font-size: 23px; } .summary { grid-template-columns: 1fr 1fr; } }
 """
 
 NECESSIDADE_LABELS = {
@@ -418,7 +423,7 @@ def _render_service_indicators(
   <div class="stat"><span class="n">{pct.pct_patients_with_active_pending}%</span>Com pendência ativa</div>
   <div class="stat"><span class="n">{pct.pct_patients_without_edd}%</span>Sem EDD documentada</div>
   <div class="stat"><span class="n">{pct.pct_patients_with_edd_overdue}%</span>EDD vencida</div>
-  <div class="stat"><span class="n">{_format_hours(pct.median_resolution_hours)}</span>Tempo mediano de resolução</div>
+  <div class="stat compact"><span class="n">{_format_hours(pct.median_resolution_hours)}</span>Tempo mediano de resolução</div>
   <div class="stat"><span class="n">{pct.patients_dia_vermelho}</span>Dia vermelho hoje</div>
   <div class="stat"><span class="n">{pct.patients_dia_verde}</span>Dia verde hoje</div>
 </div>"""
