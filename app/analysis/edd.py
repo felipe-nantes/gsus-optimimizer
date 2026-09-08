@@ -42,11 +42,26 @@ _RELATIVE_COLON = re.compile(
 )
 _TOMORROW = re.compile(_QUALIFIER + _ALTA + r"\s+(?:para\s+|em\s+)?amanh[aã]\b", re.IGNORECASE)
 _TODAY = re.compile(_QUALIFIER + _ALTA + r"\s+(?:para\s+)?hoje\b", re.IGNORECASE)
+# Cobertura real (2026-09-08, 321 evoluções com menção a alta): a forma mais
+# comum de MED/CIR é "previsão de alta: dia 30/08/26" -- dois separadores
+# seguidos (":" e "dia") e ano com dois dígitos.
 _EXPLICIT = re.compile(
-    r"\b(?:previs[aã]o\s+de\s+alta|alta\s+prevista|alta\s+programada)(?:\s+hospitalar)?"
-    r"\s*(?::|-|–|em|para|no\s+dia|dia)?\s*(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b",
+    r"\b(?:previs[aã]o\s+de\s+alta|alta\s+(?:prevista|programada|estimada))(?:\s+hospitalar)?"
+    r"(?:\s*(?::|-|–|em|para|no|o|dia|de))*\s*(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b",
     re.IGNORECASE,
 )
+# "alta em 14/08" sem a palavra "previsão": só vale como previsão quando a data
+# ainda não passou -- no passado é relato de história ("alta em 11/07, retornou
+# em 13/07"), nunca uma EDD.
+_DATED_DISCHARGE = re.compile(
+    r"\balta(?!\s+d[ao]\b)(?:\s+hospitalar)?\s+(?:em|para)\s+(?:o\s+)?(?:dia\s+)?"
+    r"(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b",
+    re.IGNORECASE,
+)
+# Sem ano escrito e data já passada: só vira ano seguinte perto da virada do
+# ano ("alta 02/01" escrita em 28/12); fora disso a data passada é mantida
+# (previsão que venceu), nunca empurrada um ano pra frente.
+_YEAR_ROLLOVER_MAX_DAYS = 90
 _NEGATION_BEFORE = re.compile(r"\bsem\s+$", re.IGNORECASE)
 _NEGATION_WINDOW = 12
 
@@ -78,13 +93,13 @@ def _explicit_date(match: re.Match, anchor: datetime) -> date | None:
         parsed = date(candidate_year, month, day)
     except ValueError:
         return None
-    # Sem ano escrito e data já passada (ex.: "alta 02/01" escrita em 28/12):
-    # vale o ano seguinte.
     if year is None and parsed < anchor.date():
         try:
-            parsed = date(candidate_year + 1, month, day)
+            rolled = date(candidate_year + 1, month, day)
         except ValueError:
             return None
+        if (rolled - anchor.date()).days <= _YEAR_ROLLOVER_MAX_DAYS:
+            parsed = rolled
     return parsed
 
 
@@ -98,8 +113,9 @@ def _relative_date(match: re.Match, anchor: datetime) -> date:
 
 def infer_edd_from_text(text: str | None, anchor: datetime) -> str | None:
     """Data prevista de alta (`AAAA-MM-DD`) escrita nesta evolução, ancorada
-    em `anchor` (data/hora da evolução), ou None. Ordem: data explícita >
-    prazo numérico > amanhã > hoje. Nunca inventa: sem prazo, None."""
+    em `anchor` (data/hora da evolução), ou None. Ordem: data explícita de
+    previsão > "alta em dd/mm" futura > prazo numérico > amanhã > hoje.
+    Nunca inventa: sem prazo, None."""
     if not text:
         return None
     for match in _EXPLICIT.finditer(text):
@@ -107,6 +123,12 @@ def infer_edd_from_text(text: str | None, anchor: datetime) -> str | None:
             continue
         parsed = _explicit_date(match, anchor)
         if parsed is not None:
+            return parsed.isoformat()
+    for match in _DATED_DISCHARGE.finditer(text):
+        if _negated(text, match.start()):
+            continue
+        parsed = _explicit_date(match, anchor)
+        if parsed is not None and parsed >= anchor.date():
             return parsed.isoformat()
     for pattern in (_RELATIVE, _RELATIVE_COLON):
         for match in pattern.finditer(text):
