@@ -411,3 +411,25 @@ def test_report_shows_evidence_dates_in_brazilian_format(tmp_path):
     assert "Evidência 1: 20/08/2026 09:32" in content
     assert "Evidência 2: 21/08/2026" in content  # meia-noite exata = data sem hora
     assert "2026-08-20T09:32:00" not in content
+
+
+def test_report_lists_recent_admissions_awaiting_notes_outside_failures(tmp_path):
+    """RESIL-015: admitido há pouco sem card/evolução acessível aparece num
+    bloco neutro próprio (com a data de admissão), nunca em "não processados"."""
+    repo = _setup_repo(tmp_path)
+    fresh = repo.upsert_patient(
+        Patient(record_number="333", bed="3C", unit="Clínica Médica", admission_date="08/09/2026")
+    )
+    run_id = repo.start_run()
+    repo.enqueue_patients(run_id, [fresh])
+    repo.mark_processing(run_id, fresh)
+    repo.mark_awaiting_notes(run_id, fresh)
+
+    output = generate_report(repo, run_id, "Clínica Médica", tmp_path / "relatorio.html")
+    content = output.read_text(encoding="utf-8")
+
+    assert "Aguardando 1ª evolução" in content
+    assert "Admitidos há pouco, ainda sem evolução acessível (1)" in content
+    assert "prontuário 333" in content
+    assert "admitido em 08/09/2026" in content
+    assert "Prontuários não processados" not in content

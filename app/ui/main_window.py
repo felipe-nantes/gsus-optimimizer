@@ -806,9 +806,12 @@ class MainWindow:
                             f"{counts['completed']}/{counts['found']} pacientes processados. Tente mais tarde."
                         )
                     else:
+                        # RESIL-015: categoria benigna, dita à parte das falhas.
+                        awaiting = counts.get("awaiting_notes", 0)
+                        awaiting_text = f", {awaiting} admitido(s) há pouco sem evolução ainda" if awaiting else ""
                         self.status_label.config(
                             text=f"Atualizado — {counts['completed']}/{counts['found']} pacientes "
-                            f"({counts['failed']} falha(s))"
+                            f"({counts['failed']} falha(s){awaiting_text})"
                         )
                     self._finish_update()
                     return

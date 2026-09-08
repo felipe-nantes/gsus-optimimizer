@@ -208,6 +208,26 @@ class GSUSSearchUnresponsiveError(GSUSRecordError):
     execução em vez de gastar horas."""
 
 
+class GSUSCurrentAdmissionNotFound(GSUSRecordError):
+    """A busca de prontuário RODOU (menu respondeu, número enviado) e o
+    marcador da internação atual (`CURRENT_ADMISSION_MARKER`) não apareceu
+    em nenhuma tentativa. Achado real (RESIL-015, 2026-09-08): 28 das 60
+    ocorrências históricas eram pacientes admitidos HOJE ou ONTEM -- o GSUS
+    ainda não mostra o card da internação recém-aberta -- e nunca uma
+    falha deste programa. O orchestrator decide pela data de admissão se
+    é caso benigno (`RECENT_ADMISSION_GRACE_DAYS`) ou erro de verdade;
+    a mensagem continua a mesma (casada em `KNOWN_GSUS_ERROR_PATTERNS`)."""
+
+
+class GSUSNoNotesToExtract(GSUSRecordError):
+    """O card da internação atual existe e lista dia(s), mas nenhum dia
+    rendeu evolução acessível (dia único ainda oculto/vazio). Mesmo
+    raciocínio de `GSUSCurrentAdmissionNotFound`: em admissão recente é
+    o esperado (ninguém evoluiu ainda), não uma falha (RESIL-015). Antes
+    era o `GSUSRecordError` genérico -- 32 das 45 ocorrências históricas
+    eram admissões de hoje/ontem."""
+
+
 # DEC-102: 3 não bastou numa instabilidade real do GSUS/máquina lenta --
 # achado ao vivo 2026-09-01 (execução real, RESIL-008): 21 de 23 pacientes
 # tentados falharam aqui em sequência (marcador nunca apareceu dentro de
@@ -373,7 +393,7 @@ def open_current_admission(page: Frame | Page, record_number: str) -> Frame | Pa
             f"A tela de busca de prontuário não respondeu em {SEARCH_RETRY_ATTEMPTS} tentativas "
             "(menu Atendimento/Pesquisar Prontuário) -- GSUS lento, instável ou sessão degradada."
         )
-    raise GSUSRecordError(
+    raise GSUSCurrentAdmissionNotFound(
         f"Nenhuma internação em andamento encontrada após "
         f"{SEARCH_RETRY_ATTEMPTS} tentativas (marcador '{CURRENT_ADMISSION_MARKER}' não apareceu)."
     )
@@ -543,7 +563,7 @@ def extract_notes(
             raise GSUSNoCurrentAdmissionDays(
                 "Prontuário sem dias de internação atual na tela (só episódios antigos)."
             )
-        raise GSUSRecordError("Nenhuma evolução encontrada para extrair.")
+        raise GSUSNoNotesToExtract("Nenhuma evolução encontrada para extrair.")
 
     return "\n\n".join(day["text"] for day in days if day["text"])
 

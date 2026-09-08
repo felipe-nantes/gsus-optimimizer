@@ -15,13 +15,13 @@ import logging
 import queue
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Protocol
 
 from app.analysis import run_diagnosis
 from app.analysis.llm import LLMAnalysisError
-from app.analysis.priority import compute_priority, hours_elapsed_since, pre_admission_cutoff_iso
+from app.analysis.priority import compute_priority, days_since_admission, hours_elapsed_since, pre_admission_cutoff_iso
 from app.analysis.rules import StructuredNote, apply_all_rules, most_recent_note
 from app.analysis.taxonomy import CATEGORY_INTERCONSULTA, CATEGORY_PROCEDIMENTO_CIRURGIA, default_origin
 from app.extraction.hashing import compute_note_hash
@@ -33,7 +33,12 @@ from app.extraction.normalizer import (
 )
 from app.extraction.parser import parse_note_blocks
 from app.gsus.census import GSUSCensusIncompleteError
-from app.gsus.records import GSUSNoCurrentAdmissionDays, GSUSSearchUnresponsiveError
+from app.gsus.records import (
+    GSUSCurrentAdmissionNotFound,
+    GSUSNoCurrentAdmissionDays,
+    GSUSNoNotesToExtract,
+    GSUSSearchUnresponsiveError,
+)
 from app.models import Note, Patient
 from app.reports import dashboard_metrics
 from app.reports.html_report import generate_report
@@ -93,6 +98,16 @@ MAX_CONSECUTIVE_UNHEALTHY_CHECKS = 2
 GSUS_UNRESPONSIVE_RELOGIN_AFTER = 3
 GSUS_UNRESPONSIVE_ABORT_AFTER = 6
 
+# RESIL-015 (achado real 2026-09-08): paciente admitido HOJE ou ONTEM cujo
+# card da internação ainda não aparece na busca, ou cujo único dia ainda não
+# tem evolução acessível, não é falha -- é o intervalo normal entre a
+# admissão e a primeira evolução. Até esta folga (dias desde a admissão),
+# esses dois casos viram AWAITING_NOTES (categoria benigna, sem alarme);
+# acima dela continuam ERROR, porque aí o padrão passa a indicar GSUS
+# instável ou alta não refletida no censo. Histórico: 28/60 e 32/45 das
+# ocorrências caíam em 0-1 dia.
+RECENT_ADMISSION_GRACE_DAYS = 1
+
 
 class CensusSource(Protocol):
     def get_census(self) -> list[Patient]: ...
@@ -125,6 +140,14 @@ class RunResult:
     status: str = "COMPLETED"
 
 
+def _is_recent_admission(admission_date: str | None, today: date | None = None) -> bool:
+    """RESIL-015: admissão de hoje ou de ontem (`RECENT_ADMISSION_GRACE_DAYS`).
+    Data ausente/irreconhecível conta como NÃO recente -- na dúvida, o caso
+    segue como erro visível, nunca some numa categoria benigna."""
+    days = days_since_admission(admission_date, today)
+    return days is not None and 0 <= days <= RECENT_ADMISSION_GRACE_DAYS
+
+
 def run_once(
     repo: Repository,
     census_source: CensusSource,
@@ -150,7 +173,7 @@ def run_once(
         return cancel_event is not None and cancel_event.is_set()
 
     def empty_counts() -> dict:
-        return {"found": 0, "completed": 0, "failed": 0, "no_admission": 0}
+        return {"found": 0, "completed": 0, "failed": 0, "no_admission": 0, "awaiting_notes": 0}
 
     # Achado real (auditoria de resiliência 2026-08-28): antes desta trava,
     # qualquer exceção não prevista escapando desta função (falha de
@@ -345,6 +368,21 @@ def run_once(
                     repo.mark_no_admission(run_id, patient_id)
                     consecutive_unresponsive = 0
                     relogin_attempted = False
+                except (GSUSCurrentAdmissionNotFound, GSUSNoNotesToExtract) as exc:
+                    # RESIL-015: card ainda não visível na busca / único dia sem
+                    # evolução acessível. Em admissão recente é o esperado
+                    # (categoria benigna, retomado na próxima atualização);
+                    # fora da folga continua erro visível, como antes.
+                    if _is_recent_admission(patients_by_id[patient_id].admission_date):
+                        repo.mark_awaiting_notes(run_id, patient_id)
+                    else:
+                        logger.exception(
+                            "Falha ao processar paciente %s", pseudonym.for_log(patient_id),
+                        )
+                        repo.mark_error(run_id, patient_id, _safe_error_text(exc))
+                    # O GSUS respondeu (a busca rodou): zera o disjuntor.
+                    consecutive_unresponsive = 0
+                    relogin_attempted = False
                 except GSUSSearchUnresponsiveError as exc:
                     # DEC-117: a busca nem chegou a ser disparada -- causa é o
                     # GSUS/sessão, não o paciente. Continua isolado por paciente
@@ -530,6 +568,7 @@ def run_once(
                     found=final_counts["found"],
                     completed=final_counts["completed"],
                     no_admission=final_counts["no_admission"],
+                    awaiting_notes=final_counts["awaiting_notes"],
                     patient_errors=repo.get_error_messages_for_run(run_id),
                     census_complete=census_complete,
                 )

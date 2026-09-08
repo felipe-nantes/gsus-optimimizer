@@ -366,3 +366,20 @@ def test_open_current_admission_mixed_failures_are_not_unresponsive(monkeypatch)
         open_current_admission(object(), "123456")
 
     assert not isinstance(excinfo.value, records.GSUSSearchUnresponsiveError)
+
+
+def test_open_current_admission_marker_missing_is_a_distinct_current_admission_not_found(monkeypatch):
+    """RESIL-015: busca rodou (menu respondeu) e o marcador nunca apareceu ->
+    subclasse própria, pra o orchestrator decidir pela data de admissão se é
+    caso benigno (admissão recente) ou erro. Continua GSUSRecordError e
+    continua com a MESMA mensagem (casada em KNOWN_GSUS_ERROR_PATTERNS)."""
+    monkeypatch.setattr(records, "_click_menu_to_search_screen", lambda page: True)
+    monkeypatch.setattr(records, "_submit_search", lambda page, record_number: _FakeNeverFoundResultPage())
+    monkeypatch.setattr(records, "_snapshot_pages", lambda page: frozenset())
+
+    with pytest.raises(records.GSUSCurrentAdmissionNotFound) as excinfo:
+        open_current_admission(object(), "123456")
+
+    assert isinstance(excinfo.value, GSUSRecordError)
+    assert not isinstance(excinfo.value, records.GSUSSearchUnresponsiveError)
+    assert "Nenhuma internação em andamento encontrada" in str(excinfo.value)

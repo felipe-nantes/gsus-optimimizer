@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS runs (
     patients_found          INTEGER NOT NULL DEFAULT 0,
     patients_completed      INTEGER NOT NULL DEFAULT 0,
     patients_failed         INTEGER NOT NULL DEFAULT 0,
-    patients_no_admission   INTEGER NOT NULL DEFAULT 0
+    patients_no_admission   INTEGER NOT NULL DEFAULT 0,
+    patients_awaiting_notes INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS patients (
@@ -247,7 +248,7 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_category_snapshot ON daily_snapshot_cate
 CREATE INDEX IF NOT EXISTS idx_run_diagnostics_created ON run_diagnostics(created_at);
 """
 
-VALID_QUEUE_STATUSES = {"PENDING", "PROCESSING", "DONE", "ERROR", "NO_ADMISSION"}
+VALID_QUEUE_STATUSES = {"PENDING", "PROCESSING", "DONE", "ERROR", "NO_ADMISSION", "AWAITING_NOTES"}
 VALID_PENDING_STATUSES = {"ACTIVE", "RESOLVED", "UNKNOWN"}
 
 
@@ -286,6 +287,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     runs_columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
     if "patients_no_admission" not in runs_columns:
         conn.execute("ALTER TABLE runs ADD COLUMN patients_no_admission INTEGER NOT NULL DEFAULT 0")
+    if "patients_awaiting_notes" not in runs_columns:  # RESIL-015
+        conn.execute("ALTER TABLE runs ADD COLUMN patients_awaiting_notes INTEGER NOT NULL DEFAULT 0")
 
     # DEC-057: novos campos do modelo de auditoria concorrente.
     state_new_columns = {

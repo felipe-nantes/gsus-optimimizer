@@ -17,7 +17,11 @@ import pytest
 from app.analysis import run_diagnosis
 from app.analysis.llm import LLMAnalysisError
 from app.gsus.census import GSUSCensusError, GSUSCensusIncompleteError
-from app.gsus.records import GSUSNoCurrentAdmissionDays
+from app.gsus.records import (
+    GSUSCurrentAdmissionNotFound,
+    GSUSNoCurrentAdmissionDays,
+    GSUSNoNotesToExtract,
+)
 from app.models import Patient
 from app.orchestrator import run_once
 from app.storage import database
@@ -91,6 +95,19 @@ class NoCurrentAdmissionRecordSource(FixtureRecordSource):
         return super().get_raw_notes_text(patient)
 
 
+class CardNotFoundRecordSource(FixtureRecordSource):
+    """RESIL-015: paciente '777' -- a busca roda mas o card da internação
+    atual nunca aparece; '666' -- card existe mas nenhum dia rendeu evolução.
+    O desfecho depende da data de admissão de cada um (orchestrator)."""
+
+    def get_raw_notes_text(self, patient: Patient, known_days=frozenset()) -> str:
+        if patient.record_number == "777":
+            raise GSUSCurrentAdmissionNotFound("simulado: marcador não apareceu")
+        if patient.record_number == "666":
+            raise GSUSNoNotesToExtract("simulado: nenhuma evolução encontrada")
+        return super().get_raw_notes_text(patient)
+
+
 class StubLLM:
     """Substitui LocalLLM real: devolve uma análise válida e fixa para
     qualquer paciente com notas novas, sem precisar de llama-server/modelo."""
@@ -129,7 +146,7 @@ def test_pipeline_end_to_end_persists_and_generates_report(tmp_path):
 
     result = run_once(repo, census, records, UNIT, report_path, llm=StubLLM())
 
-    assert result.counts == {"found": 2, "completed": 2, "failed": 0, "no_admission": 0}
+    assert result.counts == {"found": 2, "completed": 2, "failed": 0, "no_admission": 0, "awaiting_notes": 0}
     assert report_path.exists()
 
     content = report_path.read_text(encoding="utf-8")
@@ -151,7 +168,7 @@ def test_pipeline_isolates_patient_failure_without_stopping_batch(tmp_path):
 
     result = run_once(repo, census, records, UNIT, report_path, llm=StubLLM())
 
-    assert result.counts == {"found": 3, "completed": 2, "failed": 1, "no_admission": 0}
+    assert result.counts == {"found": 3, "completed": 2, "failed": 1, "no_admission": 0, "awaiting_notes": 0}
     content = report_path.read_text(encoding="utf-8")
     assert "prontuário 999" in content  # falha visível no relatório (RF-14)
     conn.close()
@@ -170,7 +187,7 @@ def test_pipeline_no_current_admission_is_not_counted_as_failure(tmp_path):
 
     result = run_once(repo, census, records, UNIT, report_path, llm=StubLLM())
 
-    assert result.counts == {"found": 3, "completed": 2, "failed": 0, "no_admission": 1}
+    assert result.counts == {"found": 3, "completed": 2, "failed": 0, "no_admission": 1, "awaiting_notes": 0}
     content = report_path.read_text(encoding="utf-8")
     assert "Sem internação atual" in content
     assert "prontuário 888" in content
@@ -248,7 +265,7 @@ def test_pipeline_isolates_bookkeeping_failure_without_aborting_the_whole_batch(
     # Achado real: SEM o fix, "300" nunca seria alcançado (a run abortava
     # inteira na falha de "200") -- teria found=3, completed=0, failed=0,
     # e "300" ficaria PENDING pra sempre, sem nenhum ERROR correspondente.
-    assert result.counts == {"found": 3, "completed": 2, "failed": 1, "no_admission": 0}
+    assert result.counts == {"found": 3, "completed": 2, "failed": 1, "no_admission": 0, "awaiting_notes": 0}
     failed = repo.get_failed_patients(result.run_id)
     assert len(failed) == 1
     assert failed[0]["patient_id"] == "200"
@@ -442,7 +459,7 @@ def test_pipeline_without_llm_still_applies_deterministic_rules(tmp_path):
 
     result = run_once(repo, census, records, UNIT, report_path, llm=None)
 
-    assert result.counts == {"found": 1, "completed": 1, "failed": 0, "no_admission": 0}
+    assert result.counts == {"found": 1, "completed": 1, "failed": 0, "no_admission": 0, "awaiting_notes": 0}
     content = report_path.read_text(encoding="utf-8")
     assert "tomografia" in content.lower()
     conn.close()
@@ -879,7 +896,7 @@ def test_pipeline_cancel_before_start_never_touches_the_census(tmp_path):
     )
 
     assert result.status == "CANCELLED"
-    assert result.counts == {"found": 0, "completed": 0, "failed": 0, "no_admission": 0}
+    assert result.counts == {"found": 0, "completed": 0, "failed": 0, "no_admission": 0, "awaiting_notes": 0}
     assert conn.execute("SELECT COUNT(*) AS n FROM runs").fetchone()["n"] == 0
     conn.close()
 
@@ -942,7 +959,7 @@ def test_pipeline_gsus_unresponsive_relogs_after_3_and_aborts_after_6(tmp_path):
     assert result.status == "ABORTED_GSUS"
     assert records.calls == 6  # parou no sexto paciente seguido, nao moeu os 9
     assert records.resets == 1  # re-login pedido uma vez, depois do terceiro
-    assert result.counts == {"found": 9, "completed": 0, "failed": 6, "no_admission": 0}
+    assert result.counts == {"found": 9, "completed": 0, "failed": 6, "no_admission": 0, "awaiting_notes": 0}
     run_row = conn.execute("SELECT status FROM runs WHERE run_id = ?", (result.run_id,)).fetchone()
     assert run_row["status"] == "FAILED"
     pending = conn.execute(
@@ -1010,4 +1027,55 @@ def test_pipeline_gsus_unresponsive_streak_resets_when_another_error_type_interl
     assert records.calls == 11
     assert records.resets == 2
     assert result.counts["failed"] == 11
+    conn.close()
+
+
+def test_pipeline_recent_admission_without_card_or_notes_is_benign_not_failure(tmp_path):
+    """RESIL-015: admitidos hoje/ontem cujo card ou evolução o GSUS ainda não
+    mostra viram AWAITING_NOTES -- fora das falhas, fora de "sem internação",
+    listados à parte no relatório e retomados na próxima execução."""
+    from datetime import date, timedelta
+
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    today = date.today().strftime("%d/%m/%Y")
+    yesterday = (date.today() - timedelta(days=1)).strftime("%d/%m/%Y")
+    patients = _patients() + [
+        Patient(record_number="777", bed="5A", unit=UNIT, admission_date=today),
+        Patient(record_number="666", bed="5B", unit=UNIT, admission_date=yesterday),
+    ]
+    records = CardNotFoundRecordSource({"100": "awaiting_exam.txt", "200": "resolved_consult.txt"})
+    report_path = tmp_path / "relatorio.html"
+
+    result = run_once(repo, FixtureCensusSource(patients), records, UNIT, report_path, llm=StubLLM())
+
+    assert result.counts == {"found": 4, "completed": 2, "failed": 0, "no_admission": 0, "awaiting_notes": 2}
+    content = report_path.read_text(encoding="utf-8")
+    assert "Admitidos há pouco, ainda sem evolução acessível (2)" in content
+    assert "prontuário 777" in content and "prontuário 666" in content
+    assert "Prontuários não processados" not in content
+    diagnostic = repo.get_latest_run_diagnostic()
+    assert diagnostic["outcome"] == run_diagnosis.OUTCOME_SUCESSO
+    assert "2 admitido(s) há pouco" in diagnostic["summary"]
+    conn.close()
+
+
+def test_pipeline_old_admission_without_card_stays_a_visible_failure(tmp_path):
+    """Contraprova do RESIL-015: o MESMO sinal num paciente internado há dias
+    continua erro visível (GSUS instável ou alta não refletida no censo)."""
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    patients = _patients() + [
+        Patient(record_number="777", bed="5A", unit=UNIT, admission_date="01/08/2026"),
+        Patient(record_number="666", bed="5B", unit=UNIT, admission_date=None),
+    ]
+    records = CardNotFoundRecordSource({"100": "awaiting_exam.txt", "200": "resolved_consult.txt"})
+    report_path = tmp_path / "relatorio.html"
+
+    result = run_once(repo, FixtureCensusSource(patients), records, UNIT, report_path, llm=StubLLM())
+
+    assert result.counts == {"found": 4, "completed": 2, "failed": 2, "no_admission": 0, "awaiting_notes": 0}
+    content = report_path.read_text(encoding="utf-8")
+    assert "Prontuários não processados (2)" in content
+    assert "Admitidos há pouco" not in content
     conn.close()

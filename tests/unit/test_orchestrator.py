@@ -7,6 +7,8 @@ from app.analysis.rules import StructuredNote
 from app.models import Note, Patient
 from app.orchestrator import (
     LLM_LOOKBACK_DAYS,
+    RECENT_ADMISSION_GRACE_DAYS,
+    _is_recent_admission,
     _find_matching_pending,
     _limit_to_char_budget,
     _limit_to_recent_window,
@@ -653,3 +655,27 @@ def test_process_patient_without_admission_date_filters_nothing(repo):
     )
     _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(old_note))
     assert len(repo.get_active_pending_items(patient_id)) == 1  # sem data de internação, nunca descarta
+
+
+# ------------------------------------------------------ RESIL-015: admissão recente
+def test_is_recent_admission_accepts_today_and_yesterday_in_gsus_format():
+    from datetime import date
+
+    today = date(2026, 9, 8)
+    assert RECENT_ADMISSION_GRACE_DAYS == 1
+    assert _is_recent_admission("08/09/2026", today) is True
+    assert _is_recent_admission("07/09/2026", today) is True
+    assert _is_recent_admission("2026-09-07", today) is True  # ISO também (dado sintético)
+
+
+def test_is_recent_admission_rejects_older_future_missing_or_garbage_dates():
+    from datetime import date
+
+    today = date(2026, 9, 8)
+    assert _is_recent_admission("06/09/2026", today) is False  # 2 dias: fora da folga
+    # Data futura (erro de digitação no GSUS): `days_since_admission` trunca em 0,
+    # logo conta como recente -- benigno, o paciente é retomado na próxima execução.
+    assert _is_recent_admission("09/09/2026", today) is True
+    assert _is_recent_admission(None, today) is False
+    assert _is_recent_admission("", today) is False
+    assert _is_recent_admission("sem data", today) is False

@@ -47,7 +47,7 @@ def test_queue_full_cycle_done(repo):
 
     assert repo.next_pending(run_id) is None
     counts = repo.get_run_counts(run_id)
-    assert counts == {"found": 1, "completed": 1, "failed": 0, "no_admission": 0}
+    assert counts == {"found": 1, "completed": 1, "failed": 0, "no_admission": 0, "awaiting_notes": 0}
 
 
 def test_queue_error_does_not_block_other_patients(repo):
@@ -65,7 +65,7 @@ def test_queue_error_does_not_block_other_patients(repo):
     repo.mark_done(run_id, p2)
 
     counts = repo.get_run_counts(run_id)
-    assert counts == {"found": 2, "completed": 1, "failed": 1, "no_admission": 0}
+    assert counts == {"found": 2, "completed": 1, "failed": 1, "no_admission": 0, "awaiting_notes": 0}
 
     failed = repo.get_failed_patients(run_id)
     assert len(failed) == 1
@@ -451,3 +451,29 @@ def test_daily_snapshot_with_no_categories_returns_empty_children(repo):
     )
 
     assert repo.get_daily_snapshot_categories(snapshot_id) == []
+
+
+def test_mark_awaiting_notes_is_counted_apart_from_errors_and_no_admission(repo):
+    """RESIL-015: admitido há pouco sem card/evolução acessível é categoria
+    própria -- nunca infla `failed` nem `no_admission`."""
+    fresh = repo.upsert_patient(_sample_patient("111"))
+    done = repo.upsert_patient(_sample_patient("222"))
+    run_id = repo.start_run()
+    repo.enqueue_patients(run_id, [fresh, done])
+    repo.mark_processing(run_id, fresh)
+    repo.mark_awaiting_notes(run_id, fresh)
+    repo.mark_processing(run_id, done)
+    repo.mark_done(run_id, done)
+
+    counts = repo.get_run_counts(run_id)
+    assert counts == {"found": 2, "completed": 1, "failed": 0, "no_admission": 0, "awaiting_notes": 1}
+    assert [row["record_number"] for row in repo.get_awaiting_notes_patients(run_id)] == ["111"]
+    assert repo.get_failed_patients(run_id) == []
+    assert repo.get_error_messages_for_run(run_id) == []
+
+    repo.finish_run(run_id, "COMPLETED")
+    run_row = repo.conn.execute(
+        "SELECT patients_awaiting_notes, patients_failed FROM runs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    assert (run_row["patients_awaiting_notes"], run_row["patients_failed"]) == (1, 0)
+

@@ -123,12 +123,28 @@ def classify_top_level_exception(exc: Exception) -> tuple[str, str]:
     )
 
 
+def _benign_suffix(no_admission: int, awaiting_notes: int) -> str:
+    """Complemento do resumo com as categorias que NÃO são falha: sem
+    internação atual (DEC-054) e admitidos há pouco ainda sem evolução
+    acessível (RESIL-015)."""
+    parts = []
+    if no_admission:
+        parts.append(f"{no_admission} sem internação atual (provável alta recente)")
+    if awaiting_notes:
+        parts.append(
+            f"{awaiting_notes} admitido(s) há pouco ainda sem evolução acessível "
+            "(entram na próxima atualização)"
+        )
+    return (", " + ", ".join(parts) + ".") if parts else "."
+
+
 def classify_completed_run(
     found: int,
     completed: int,
     no_admission: int,
     patient_errors: list[str],
     census_complete: bool,
+    awaiting_notes: int = 0,
 ) -> tuple[str, str, bool]:
     """Classifica uma execução que RODOU até o fim (Fase 1 completa, run
     persistida) -- `patient_errors` é a lista de `last_error` de cada
@@ -155,7 +171,7 @@ def classify_completed_run(
     failed = len(patient_errors)
     if failed == 0:
         summary = f"Execução concluída sem erros -- {completed} de {found} paciente(s) processado(s)"
-        summary += f", {no_admission} sem internação atual (provável alta recente)." if no_admission else "."
+        summary += _benign_suffix(no_admission, awaiting_notes)
         return OUTCOME_SUCESSO, summary, False
 
     unknown_errors = [e for e in patient_errors if not is_known_gsus_error(e)]

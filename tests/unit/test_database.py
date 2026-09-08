@@ -107,3 +107,29 @@ def test_migration_normalizes_br_evidence_dates_and_purges_rule_items_before_adm
         assert conn.execute("SELECT COUNT(*) FROM pending_items").fetchone()[0] == 2
     finally:
         conn.close()
+
+
+def test_migration_adds_awaiting_notes_column_to_old_runs_table(tmp_path):
+    """RESIL-015: banco criado por versão anterior (sem a coluna) ganha
+    `patients_awaiting_notes` na abertura, sem perder as linhas."""
+    import sqlite3
+
+    db_path = tmp_path / "auditoria.db"
+    old = sqlite3.connect(db_path)
+    old.execute(
+        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT, "
+        "status TEXT NOT NULL, patients_found INTEGER NOT NULL DEFAULT 0, "
+        "patients_completed INTEGER NOT NULL DEFAULT 0, patients_failed INTEGER NOT NULL DEFAULT 0)"
+    )
+    old.execute("INSERT INTO runs (run_id, started_at, status) VALUES ('r1', '2026-09-01T00:00:00', 'COMPLETED')")
+    old.commit()
+    old.close()
+
+    conn = database.init_db(db_path)
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+        assert {"patients_no_admission", "patients_awaiting_notes"} <= columns
+        row = conn.execute("SELECT patients_awaiting_notes FROM runs WHERE run_id = 'r1'").fetchone()
+        assert row["patients_awaiting_notes"] == 0
+    finally:
+        conn.close()

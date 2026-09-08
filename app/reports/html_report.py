@@ -166,6 +166,7 @@ def generate_report(repo: Repository, run_id: str, unit: str, output_path: Path)
     counts = repo.get_run_counts(run_id)
     failed = repo.get_failed_patients(run_id)
     no_admission = repo.get_no_admission_patients(run_id)
+    awaiting_notes = repo.get_awaiting_notes_patients(run_id)  # RESIL-015
     # Sem filtro por `unit` abaixo -- achado real 2026-08-24 (DEC-061): a
     # conta GSUS enxerga várias unidades ao mesmo tempo (censo já é o escopo
     # de auditoria, confirmado pelo usuário), e `patients.unit` é texto que o
@@ -243,10 +244,12 @@ def generate_report(repo: Repository, run_id: str, unit: str, output_path: Path)
   <div class="stat"><span class="n">{counts['completed']}</span>Processados</div>
   <div class="stat failed"><span class="n">{counts['failed']}</span>Falhas</div>
   <div class="stat"><span class="n">{counts['no_admission']}</span>Sem internação atual</div>
+  <div class="stat"><span class="n">{counts['awaiting_notes']}</span>Aguardando 1ª evolução</div>
 </div>
 
 {_render_failures(failed)}
 {_render_no_admission(no_admission)}
+{_render_awaiting_notes(awaiting_notes)}
 
 {_render_service_indicators(service_indicators, unit_census)}
 
@@ -358,6 +361,24 @@ def _render_no_admission(rows) -> str:
     )
     return f"""<div class="no-admission">
   <h2>Sem internação atual, prováveis altas recentes ({len(rows)})</h2>
+  <ul>{items}</ul>
+</div>"""
+
+
+def _render_awaiting_notes(rows) -> str:
+    """RESIL-015: admitidos há pouco (hoje/ontem) cujo card ou evolução o
+    GSUS ainda não mostra. Não é falha nem alta -- estilo neutro, com a
+    data de admissão pra o auditor reconhecer o caso de vista."""
+    if not rows:
+        return ""
+    items = "".join(
+        f"<li>Leito {html.escape(row['bed'] or '?')} — prontuário {html.escape(row['record_number'])}"
+        f" — admitido em {html.escape(row['admission_date'] or '?')}</li>"
+        for row in rows
+    )
+    return f"""<div class="no-admission">
+  <h2>Admitidos há pouco, ainda sem evolução acessível ({len(rows)})</h2>
+  <p>O GSUS ainda não mostra a internação ou a primeira evolução desses pacientes -- entram na próxima atualização automática.</p>
   <ul>{items}</ul>
 </div>"""
 

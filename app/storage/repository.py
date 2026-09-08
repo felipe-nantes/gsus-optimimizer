@@ -26,6 +26,10 @@ QUEUE_PROCESSING = "PROCESSING"
 QUEUE_DONE = "DONE"
 QUEUE_ERROR = "ERROR"
 QUEUE_NO_ADMISSION = "NO_ADMISSION"
+# RESIL-015 (2026-09-08): admitido há pouco (hoje/ontem) e o GSUS ainda não
+# mostra o card da internação ou nenhuma evolução acessível -- não é falha,
+# entra na próxima atualização.
+QUEUE_AWAITING_NOTES = "AWAITING_NOTES"
 
 PENDING_ACTIVE = "ACTIVE"
 PENDING_RESOLVED = "RESOLVED"
@@ -66,9 +70,10 @@ class Repository:
         counts = self.get_run_counts(run_id)
         self.conn.execute(
             "UPDATE runs SET finished_at = ?, status = ?, patients_found = ?, "
-            "patients_completed = ?, patients_failed = ?, patients_no_admission = ? WHERE run_id = ?",
+            "patients_completed = ?, patients_failed = ?, patients_no_admission = ?, "
+            "patients_awaiting_notes = ? WHERE run_id = ?",
             (_now(), status, counts["found"], counts["completed"], counts["failed"],
-             counts["no_admission"], run_id),
+             counts["no_admission"], counts["awaiting_notes"], run_id),
         )
         self.conn.commit()
         logger.info("Run finalizada run_id=%s status=%s", run_id, status)
@@ -79,7 +84,8 @@ class Repository:
             "  COUNT(*) AS found, "
             "  SUM(CASE WHEN status = 'DONE' THEN 1 ELSE 0 END) AS completed, "
             "  SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS failed, "
-            "  SUM(CASE WHEN status = 'NO_ADMISSION' THEN 1 ELSE 0 END) AS no_admission "
+            "  SUM(CASE WHEN status = 'NO_ADMISSION' THEN 1 ELSE 0 END) AS no_admission, "
+            "  SUM(CASE WHEN status = 'AWAITING_NOTES' THEN 1 ELSE 0 END) AS awaiting_notes "
             "FROM processing_queue WHERE run_id = ?",
             (run_id,),
         ).fetchone()
@@ -88,6 +94,7 @@ class Repository:
             "completed": row["completed"] or 0,
             "failed": row["failed"] or 0,
             "no_admission": row["no_admission"] or 0,
+            "awaiting_notes": row["awaiting_notes"] or 0,
         }
 
     # ------------------------------------------------------ diagnóstico (DIAG-001)
@@ -388,6 +395,29 @@ class Repository:
             "FROM processing_queue q JOIN patients p ON p.patient_id = q.patient_id "
             "WHERE q.run_id = ? AND q.status = ?",
             (run_id, QUEUE_NO_ADMISSION),
+        ).fetchall()
+
+    def mark_awaiting_notes(self, run_id: str, patient_id: str) -> None:
+        """RESIL-015: admitido há pouco, card/evolução ainda não acessível no
+        GSUS -- categoria benigna, separada de ERROR e de NO_ADMISSION.
+        `logger.info`: não é um problema a investigar."""
+        self.conn.execute(
+            "UPDATE processing_queue SET status = ?, finished_at = ? "
+            "WHERE run_id = ? AND patient_id = ?",
+            (QUEUE_AWAITING_NOTES, _now(), run_id, patient_id),
+        )
+        self.conn.commit()
+        logger.info(
+            "Paciente %s admitido há pouco, ainda sem evolução acessível -- entra na próxima atualização.",
+            pseudonym.for_log(patient_id),
+        )
+
+    def get_awaiting_notes_patients(self, run_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT q.patient_id, p.record_number, p.bed, p.unit, p.admission_date "
+            "FROM processing_queue q JOIN patients p ON p.patient_id = q.patient_id "
+            "WHERE q.run_id = ? AND q.status = ?",
+            (run_id, QUEUE_AWAITING_NOTES),
         ).fetchall()
 
     # ------------------------------------------------------------- state/IA

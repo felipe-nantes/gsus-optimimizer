@@ -232,3 +232,25 @@ def test_gsus_unresponsive_run_is_described_as_gsus_failure_needing_attention():
     assert "6 paciente(s) seguido(s)" in summary
     assert "6 de 183" in summary
     assert "refazer o login" in summary
+
+
+def test_awaiting_notes_patients_never_counted_as_errors():
+    """RESIL-015: admitidos há pouco sem evolução acessível são categoria
+    benigna -- execução limpa, sem atenção, e o resumo explica que entram
+    na próxima atualização."""
+    outcome, summary, needs_attention = run_diagnosis.classify_completed_run(
+        found=10, completed=7, no_admission=1, patient_errors=[], census_complete=True, awaiting_notes=2,
+    )
+    assert outcome == run_diagnosis.OUTCOME_SUCESSO
+    assert not needs_attention
+    assert "2 admitido(s) há pouco" in summary
+    assert "1 sem internação atual" in summary
+    assert "próxima atualização" in summary
+
+
+def test_classify_completed_run_keeps_working_without_awaiting_notes_argument():
+    outcome, summary, _ = run_diagnosis.classify_completed_run(
+        found=3, completed=3, no_admission=0, patient_errors=[], census_complete=True,
+    )
+    assert outcome == run_diagnosis.OUTCOME_SUCESSO
+    assert summary.endswith("processado(s).")
