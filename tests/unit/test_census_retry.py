@@ -136,6 +136,10 @@ class _FakeSearchScreenPage:
     def locator(self, selector):
         return self
 
+    @property
+    def first(self):  # DEC-120: `.locator("visible=true").first` nos cliques de menu
+        return self
+
     def click(self):
         self.attempts += 1
         if self.attempts <= self.fail_times:

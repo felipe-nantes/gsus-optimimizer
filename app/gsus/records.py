@@ -276,8 +276,12 @@ def _click_menu_to_search_screen(page: Frame | Page) -> bool:
     o handler genérico do orchestrator. Tratar aqui, com mensagem própria
     sem o texto da exceção, evita isso."""
     try:
-        page.get_by_text("Atendimento", exact=True).click()
-        page.get_by_text("Pesquisar Prontuário", exact=True).click()
+        # DEC-120: primeiro elemento VISÍVEL com o texto -- o mesmo menu
+        # customizado do censo mostrou item duplicado ("strict mode
+        # violation", achado real 2026-09-07); aqui o efeito seria 5 falhas
+        # instantâneas por paciente em vez de uma tentativa de verdade.
+        page.get_by_text("Atendimento", exact=True).locator("visible=true").first.click()
+        page.get_by_text("Pesquisar Prontuário", exact=True).locator("visible=true").first.click()
         return True
     except PlaywrightError:
         return False
@@ -721,6 +725,41 @@ def _current_episode_card_id(page: Frame | Page) -> str:
     return result if isinstance(result, str) else ""
 
 
+def _ensure_episode_expanded(page: Frame | Page, card_id: str) -> bool:
+    """DEC-119 (achado real na 1ª execução 1.4.0, 2026-09-07): o filtro
+    escolhia o card certo, mas 0 de N dias eram capturados -- o acordeão de
+    episódios é EXCLUSIVO, então `_expand_all` deixa aberto o ÚLTIMO
+    clicado (em geral um episódio antigo) e fecha a internação atual, cujos
+    dias ficam ocultos. Abre SÓ o episódio `card_id` (cabeçalho
+    `<card_id>Item`) se estiver fechado e confirma pela geometria do corpo
+    (mesmo critério de `_expand_all`/`_is_expanded`). False = não conseguiu
+    -- quem chama decide (o dia é pulado, nunca inventado)."""
+    if not card_id:
+        return False
+    try:
+        if _episode_body_open(page, card_id):
+            return True
+        page.locator(f'[id="{card_id}Item"]').first.click(timeout=8_000)
+        for _ in range(max(1, EXPAND_BODY_WAIT_MS // EXPAND_POLL_MS)):
+            if _episode_body_open(page, card_id):
+                return True
+            page.wait_for_timeout(EXPAND_POLL_MS)
+        return _episode_body_open(page, card_id)
+    except PlaywrightError:
+        return False
+
+
+def _episode_body_open(page: Frame | Page, card_id: str) -> bool:
+    """Episódio aberto = corpo com ALTURA real, nunca contagem de filhos.
+    Achado real (2ª execução 1.4.0, 2026-09-07): o corpo do episódio já
+    traz todos os cabeçalhos de dia no DOM mesmo colapsado (altura ~0), então
+    o critério de `_is_expanded` (filhos OU altura) dizia "aberto" e o card
+    nunca era clicado -- 0 de N dias capturados de novo. Mesmo critério da
+    listagem inicial de dias (`getBoundingClientRect().height > 60`)."""
+    metrics = _body_metrics(page, f"{card_id}Item")
+    return metrics is not None and metrics[1] > COLLAPSED_MAX_HEIGHT_PX
+
+
 def _collect_days(
     page: Frame | Page,
     deadline: float,
@@ -795,9 +834,14 @@ def _collect_days(
         if current_card and any(row[1] == current_card for row in day_rows):
             visible_rows = [row for row in day_rows if row[1] == current_card]
             criterion = "cabeçalho da internação atual"
+            # O acordeão exclusivo provavelmente fechou este card ao expandir
+            # os outros -- reabre SÓ ele antes de capturar (achado real).
+            if not _ensure_episode_expanded(page, current_card):
+                logger.warning("Não foi possível reabrir o card da internação atual -- dias podem ficar ocultos.")
         else:
             visible_rows = [row for row in day_rows if row[2]]
             criterion = "episódio aberto na tela (cabeçalho não localizado)"
+            current_card = ""  # sem card confiável, o laço não tenta reabrir nada
         ignored = len(day_rows) - len(visible_rows)
         if ignored:
             logger.info(
@@ -847,11 +891,26 @@ def _collect_days(
             # escopo dela (DEC-050).
             if not toggle.is_visible():
                 if current_episode_only:
-                    continue
-                _expand_all(page, EPISODE_TOGGLE_SELECTOR, "episódio", deadline=deadline)
-                if not toggle.is_visible():
-                    logger.warning("Dia %d/%d segue oculto -- seguindo sem ele.", index, total)
-                    continue
+                    # DEC-119: se o card da internação atual é conhecido, o dia
+                    # oculto é dele e o acordeão o fechou -- reabre SÓ esse
+                    # card e tenta de novo. Sem card conhecido, vale DEC-050:
+                    # dia oculto na rotina automática é episódio antigo.
+                    if not current_card:
+                        continue
+                    if not (_ensure_episode_expanded(page, current_card) and toggle.is_visible()):
+                        # Achado real (4ª execução 1.4.0): 2 pacientes com UM dia
+                        # no card atual que segue oculto mesmo com o card aberto
+                        # -- registrado pra investigar, nunca silencioso.
+                        logger.warning(
+                            "Dia %d/%d do card da internação atual segue oculto após reabrir -- seguindo sem ele.",
+                            index, total,
+                        )
+                        continue
+                else:
+                    _expand_all(page, EPISODE_TOGGLE_SELECTOR, "episódio", deadline=deadline)
+                    if not toggle.is_visible():
+                        logger.warning("Dia %d/%d segue oculto -- seguindo sem ele.", index, total)
+                        continue
 
             if not _is_expanded(page, toggle_id):
                 toggle.click(timeout=8_000)

@@ -623,6 +623,10 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
 [ ] UI-008       Pedidos do pagador (2026-09-07): censo por unidade em destaque com ampliação; cor nos
                  números de dia verde/vermelho no relatório; painel dizer "aguardando análise de IA"
                  em vez de traço; renomear "tempo mediano de resolução".
+[x] RESIL-014    Acordeão exclusivo fecha o card da internação atual após `_expand_all` (achado real
+                 2026-09-07, DEC-120): `_ensure_episode_expanded` reabre só o card identificado.
+                 Clique de menu por texto usa o primeiro elemento VISÍVEL (item duplicado no GSUS
+                 derrubava o censo com strict mode violation).
 [x] REPORT-002   Relatório HTML alinhado à mesma referência visual (DEC-113): cartões arredondados,
                  hierarquia tipográfica, tabelas claras, tags e destaques laranja, responsivo
                  para telas menores. Prévia segura reproduzível em `scripts/preview_report.py`,

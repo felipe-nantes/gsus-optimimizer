@@ -168,3 +168,68 @@ def test_collect_days_ignores_header_answer_that_matches_no_day():
 
     assert total == 1
     assert len(days) == 1
+
+
+class _FakeAccordionLocator(_FakeLocator):
+    """Dia do card da internação atual (codCUR9) fica OCULTO até o cabeçalho
+    desse card ser clicado -- simula o acordeão exclusivo do GSUS."""
+
+    def __init__(self, page, selector):
+        super().__init__()
+        self._page = page
+        self._selector = selector
+
+    @property
+    def first(self):
+        return self
+
+    def is_visible(self):
+        if "historicoEvolucaodata" in self._selector and "codCUR9Item" in self._selector:
+            return self._page.episode_open
+        return True
+
+    def click(self, timeout=None):
+        self._page.clicks.append(self._selector)
+        if self._selector == '[id="historicoAtendimentocodCUR9Item"]':
+            self._page.episode_open = True
+
+
+class _FakeAccordionPage(_FakeCollectDaysPageWithHeader):
+    def __init__(self, day_rows):
+        super().__init__(day_rows, current_card_id="historicoAtendimentocodCUR9")
+        self.episode_open = False
+        self.clicks = []
+
+    def evaluate(self, script, arg=None):
+        if arg == "historicoAtendimentocodCUR9":  # geometria do corpo do card atual
+            # Colapsado, o corpo do episódio JÁ tem todos os cabeçalhos de dia
+            # (muitos filhos) mas altura ~0 -- achado real: só a altura vale.
+            return [40, 999] if self.episode_open else [40, 10]
+        return super().evaluate(script, arg)
+
+    def locator(self, selector):
+        return _FakeAccordionLocator(self, selector)
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+def test_collect_days_reopens_the_current_admission_card_when_the_accordion_closed_it():
+    """Achado real 2026-09-07 (1ª execução 1.4.0, abortada): o filtro
+    escolhia o card certo, mas o acordeão exclusivo o tinha fechado ao
+    expandir os outros -- "0 de N dias capturados" e paciente em erro. O
+    card identificado precisa ser reaberto antes de capturar; o estado
+    "aberto" da listagem inicial não vale nada pra ele."""
+    day_rows = [
+        _day_row("14/02/2022", episode="codOLD1", open_=True),
+        _day_row("05/09/2026", episode="codCUR9", open_=False),
+        _day_row("06/09/2026", episode="codCUR9", open_=False),
+    ]
+    page = _FakeAccordionPage(day_rows)
+
+    days, total = _collect_days(page, deadline=float("inf"), skip_days=set(), current_episode_only=True)
+
+    assert total == 2
+    assert sorted(d["date"] for d in days) == ["2026-09-05", "2026-09-06"]
+    assert '[id="historicoAtendimentocodCUR9Item"]' in page.clicks  # reabriu o card certo, só ele
+    assert all("codOLD1" not in c for c in page.clicks)

@@ -24,6 +24,13 @@ class _FakeClickTarget:
         self.should_timeout = should_timeout
         self.clicks = 0
 
+    def locator(self, selector):  # DEC-120: `.locator("visible=true").first`
+        return self
+
+    @property
+    def first(self):
+        return self
+
     def click(self, timeout=None):
         self.clicks += 1
         if self.should_timeout:

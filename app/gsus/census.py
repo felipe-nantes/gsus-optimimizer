@@ -339,5 +339,10 @@ def _navigate_to_search_screen(gsus_frame) -> None:
     customizado, não <a> (ver DECISIONS.md DEC-011/DEC-012). Localizar por
     texto exato é mais estável que o id interno do widget (ex.:
     'oCMenu__4803'), que não é garantidamente o mesmo entre sessões."""
-    gsus_frame.get_by_text("Internação", exact=True).click()
-    gsus_frame.get_by_text("Pesquisar Internação", exact=True).click()
+    # DEC-120 (achado real 2026-09-07): "Pesquisar Internação" apareceu DUAS
+    # vezes na página e o clique estrito do Playwright recusou a ambiguidade
+    # ("strict mode violation") 5 vezes em 1 segundo -- execução abortada
+    # antes do censo. Primeiro elemento VISÍVEL com o texto: um item de menu
+    # duplicado/oculto nunca deve derrubar a execução inteira.
+    gsus_frame.get_by_text("Internação", exact=True).locator("visible=true").first.click()
+    gsus_frame.get_by_text("Pesquisar Internação", exact=True).locator("visible=true").first.click()

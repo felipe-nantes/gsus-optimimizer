@@ -2239,3 +2239,18 @@ Assimetria de risco deliberada: um falso positivo aqui (tratar um censo genuinam
 **Verificação:** +13 testes; suíte inteira aprovada (358 unitários não visuais, 63 integração/E2E, UI por arquivo). Instalador 120,0 MB, SHA-256 `89957D419F4CF983FFF123E8EFD50F3EA7492C0586043C960721940A4CA960FC`. A migração e o novo critério de card só se provam na próxima auditoria real -- registrado como pendente no CURRENT_STATE.
 
 **Impacto:** `app/extraction/normalizer.py`, `app/analysis/priority.py` (`PRE_ADMISSION_GRACE_DAYS`, `pre_admission_cutoff_iso`), `app/orchestrator.py`, `app/gsus/records.py`, `app/storage/database.py`, `app/reports/html_report.py`, `installer/gsus-auditoria.iss` (1.4.0), testes. Sem mudança de schema.
+
+---
+
+## DEC-120 — Reabrir só o card da internação atual (acordeão exclusivo) e clicar no primeiro item de menu visível
+
+**Contexto (2026-09-07, primeira execução real do 1.4.0):** ver CURRENT_STATE do dia. Dois achados que só uma execução real revelaria: (1) o critério de card por cabeçalho (DEC-119) acerta o episódio, mas o acordeão exclusivo o deixa fechado depois de `_expand_all`; (2) o menu customizado do GSUS pode renderizar um item duplicado e o clique estrito do Playwright aborta em vez de tentar.
+
+**Decisões:**
+1. **Reabrir SÓ o card identificado, nunca "expandir tudo" de novo.** `_ensure_episode_expanded` clica no cabeçalho do card atual apenas se o corpo estiver colapsado e espera confirmar. "Colapsado" é decidido SÓ pela altura do corpo (`_episode_body_open`, `> 60 px`): o critério de `_is_expanded` (filhos OU altura) serve pra DIA (conteúdo chega por AJAX ao abrir), mas o corpo de EPISÓDIO já contém todos os cabeçalhos de dia mesmo fechado -- achado da execução 3. Chamado após a seleção e, defensivamente, no laço quando um dia do card está oculto (o acordeão pode fechar de novo). Sem card identificado (fallback), vale DEC-050: dia oculto na rotina automática é episódio antigo -- nada muda no caminho antigo.
+2. **Primeiro elemento VISÍVEL para cliques de menu por texto.** `locator("visible=true").first` nos dois menus (censo e prontuário). Um item duplicado/oculto vira no máximo um clique no visível; antes virava 5 falhas instantâneas e execução abortada (censo) ou paciente em erro (prontuário). Alternativa `filter(visible=True)` não existe no Playwright 1.48 empacotado.
+3. **Não subir versão de novo:** ambas as correções entram no mesmo 1.4.0 (nunca distribuído ao pagador entre as reinstalações desta noite); o SHA do instalador final fica registrado no CURRENT_STATE.
+
+**Verificação:** +1 teste de acordeão em `test_records_day_cap.py`; fakes de menu atualizados; suíte não visual aprovada. Validação real registrada no CURRENT_STATE (execução 3).
+
+**Impacto:** `app/gsus/records.py` (`_ensure_episode_expanded`, laço de `_collect_days`, `_click_menu_to_search_screen`), `app/gsus/census.py` (`_navigate_to_search_screen`), testes.
