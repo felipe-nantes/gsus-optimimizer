@@ -725,6 +725,54 @@ def _current_episode_card_id(page: Frame | Page) -> str:
     return result if isinstance(result, str) else ""
 
 
+def _list_day_rows(page: Frame | Page) -> list[list]:
+    """[id do toggle do dia, id do card_body do episódio, episódio aberto?]
+    para cada dia da tela, numa só chamada JS (DEC-045/046). Chamado de novo
+    depois de reabrir o card da internação atual (DEC-120), porque o GSUS
+    recria o dia mais recente com outro id nessa hora."""
+    try:
+        return page.evaluate(
+            """(sel) => Array.from(document.querySelectorAll(sel)).map(el => {
+                const card = el.closest('div.card_body[id^="historicoAtendimento"]');
+                const open = card ? card.getBoundingClientRect().height > 60 : false;
+                return [el.id, card ? card.id : '', open];
+            })""",
+            DAY_TOGGLE_SELECTOR,
+        )
+    except PlaywrightError as exc:
+        # Mesmo achado do DEC-082 -- `.evaluate()` também pode estourar
+        # "Frame was detached", e ficava sem tratamento local aqui. Nunca
+        # devolve `[]`: `extract_notes` interpretaria isso como "sem
+        # internação atual" (GSUSNoCurrentAdmissionDays, categoria de
+        # NÃO-falha no relatório -- DEC-054), escondendo uma falha técnica
+        # real atrás de um rótulo de "provável alta". Levanta
+        # `GSUSRecordError` (falha real, isolada por paciente via RF-12) --
+        # mensagem própria, sem o texto da exceção original.
+        raise GSUSRecordError("Não foi possível listar os dias da internação (sessão instável).") from exc
+
+
+def _relist_days_of_card(page: Frame | Page, card_id: str, previous_rows: list[list]) -> list[list]:
+    """Relista os dias depois de reabrir `card_id`, esperando (com teto) até
+    a listagem voltar a conter dias desse card -- o GSUS reconstrói o
+    conteúdo do card por AJAX e, no instante seguinte ao clique, a listagem
+    pode vir sem nenhum dia dele. Se o teto estourar, devolve a lista
+    ANTERIOR (os dias com data no id continuam válidos; só o dia auto-aberto
+    fica sujeito ao fallback do laço) -- nunca uma lista vazia, que viraria
+    "sem internação atual" (GSUSNoCurrentAdmissionDays) por engano."""
+    polls = max(1, EXPAND_BODY_WAIT_MS // EXPAND_POLL_MS)
+    rows: list[list] = []
+    for _ in range(polls):
+        rows = _list_day_rows(page)
+        if any(row[1] == card_id for row in rows):
+            return rows
+        page.wait_for_timeout(EXPAND_POLL_MS)
+    rows = _list_day_rows(page)
+    if any(row[1] == card_id for row in rows):
+        return rows
+    logger.warning("Dias do card da internação atual não reapareceram após reabrir -- usando a listagem anterior.")
+    return previous_rows
+
+
 def _ensure_episode_expanded(page: Frame | Page, card_id: str) -> bool:
     """DEC-119 (achado real na 1ª execução 1.4.0, 2026-09-07): o filtro
     escolhia o card certo, mas 0 de N dias eram capturados -- o acordeão de
@@ -745,6 +793,27 @@ def _ensure_episode_expanded(page: Frame | Page, card_id: str) -> bool:
                 return True
             page.wait_for_timeout(EXPAND_POLL_MS)
         return _episode_body_open(page, card_id)
+    except PlaywrightError:
+        return False
+
+
+def _wait_visible(page: Frame | Page, locator, timeout_ms: int = EXPAND_BODY_WAIT_MS) -> bool:
+    """Espera um toggle de dia ficar visível depois que o card do episódio foi
+    reaberto. Achado real (5ª execução 1.4.0, 2026-09-07): admissões
+    recentes (1-2 dias) falhavam com "0 de 1" mesmo com o card reaberto --
+    a altura do corpo cresce na hora do clique, mas os dias dentro dele
+    chegam por AJAX; checar `is_visible()` no mesmo instante via `False`.
+    Mesmo princípio de `_wait_expanded`: esperar o EFEITO real, com teto."""
+    polls = max(1, timeout_ms // EXPAND_POLL_MS)
+    for _ in range(polls):
+        try:
+            if locator.is_visible():
+                return True
+        except PlaywrightError:
+            return False
+        page.wait_for_timeout(EXPAND_POLL_MS)
+    try:
+        return locator.is_visible()
     except PlaywrightError:
         return False
 
@@ -800,25 +869,7 @@ def _collect_days(
     # Junto com o id: o id do CORPO do episódio que contém o dia (agrupa por
     # internação e funciona para os dois formatos de id de dia -- DEC-046) e
     # se esse episódio está aberto na tela.
-    try:
-        day_rows: list[list] = page.evaluate(
-            """(sel) => Array.from(document.querySelectorAll(sel)).map(el => {
-                const card = el.closest('div.card_body[id^="historicoAtendimento"]');
-                const open = card ? card.getBoundingClientRect().height > 60 : false;
-                return [el.id, card ? card.id : '', open];
-            })""",
-            DAY_TOGGLE_SELECTOR,
-        )
-    except PlaywrightError as exc:
-        # Mesmo achado do DEC-082 -- `.evaluate()` também pode estourar
-        # "Frame was detached", e ficava sem tratamento local aqui. Nunca
-        # devolve `([], 0)`: `extract_notes` interpretaria isso como "sem
-        # internação atual" (GSUSNoCurrentAdmissionDays, categoria de
-        # NÃO-falha no relatório -- DEC-054), escondendo uma falha técnica
-        # real atrás de um rótulo de "provável alta". Levanta
-        # `GSUSRecordError` (falha real, isolada por paciente via RF-12) --
-        # mensagem própria, sem o texto da exceção original.
-        raise GSUSRecordError("Não foi possível listar os dias da internação (sessão instável).") from exc
+    day_rows = _list_day_rows(page)
 
     if current_episode_only:
         # DEC-119 (achado real 2026-09-07): `extract_notes` expande TODOS os
@@ -832,12 +883,26 @@ def _collect_days(
         # fallback quando o cabeçalho não é localizado de forma inequívoca.
         current_card = _current_episode_card_id(page)
         if current_card and any(row[1] == current_card for row in day_rows):
-            visible_rows = [row for row in day_rows if row[1] == current_card]
             criterion = "cabeçalho da internação atual"
             # O acordeão exclusivo provavelmente fechou este card ao expandir
             # os outros -- reabre SÓ ele antes de capturar (achado real).
-            if not _ensure_episode_expanded(page, current_card):
-                logger.warning("Não foi possível reabrir o card da internação atual -- dias podem ficar ocultos.")
+            if not _episode_body_open(page, current_card):
+                if _ensure_episode_expanded(page, current_card):
+                    # DEC-120 (diagnóstico estrutural real, 2026-09-07): ao
+                    # reabrir o card, o GSUS RE-RENDERIZA o dia mais recente
+                    # (o que a página abre sozinha, DEC-046) com um id NOVO
+                    # (`historicoEvolucao0Item` -> `historicoEvolucao<N>Item`).
+                    # A lista feita antes apontava pra um elemento que não
+                    # existe mais e o dia de HOJE era pulado em todo paciente
+                    # (0 evoluções datadas do dia em 95 pacientes). Relista --
+                    # esperando os dias do card reaparecerem: logo após o
+                    # clique o corpo já cresceu mas os toggles ainda estão
+                    # sendo recriados (achado real: relistar na hora dava
+                    # "0 de 0" e o paciente virava "sem internação atual").
+                    day_rows = _relist_days_of_card(page, current_card, day_rows)
+                else:
+                    logger.warning("Não foi possível reabrir o card da internação atual -- dias podem ficar ocultos.")
+            visible_rows = [row for row in day_rows if row[1] == current_card]
         else:
             visible_rows = [row for row in day_rows if row[2]]
             criterion = "episódio aberto na tela (cabeçalho não localizado)"
@@ -897,7 +962,7 @@ def _collect_days(
                     # dia oculto na rotina automática é episódio antigo.
                     if not current_card:
                         continue
-                    if not (_ensure_episode_expanded(page, current_card) and toggle.is_visible()):
+                    if not (_ensure_episode_expanded(page, current_card) and _wait_visible(page, toggle)):
                         # Achado real (4ª execução 1.4.0): 2 pacientes com UM dia
                         # no card atual que segue oculto mesmo com o card aberto
                         # -- registrado pra investigar, nunca silencioso.
