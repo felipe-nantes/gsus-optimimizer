@@ -59,6 +59,15 @@ h2 { letter-spacing: -.015em; }
 .prio-ALTA { color: #b3261e; font-weight: bold; }
 .prio-MEDIA { color: #9b6b00; font-weight: bold; }
 .prio-MONITORAMENTO { color: var(--success); }
+/* UI-008: cor nos números de dia (pedido do pagador) e censo por unidade em destaque */
+.summary .stat.dia-vermelho .n { color: #b3261e; }
+.summary .stat.dia-verde .n { color: var(--success); }
+.summary .stat small { display: block; margin-top: 4px; font-size: 11px; color: var(--muted); }
+.unit-census { background: var(--card); border: 2px solid var(--accent); border-radius: 16px; padding: 14px 16px 6px; margin-bottom: 18px; }
+.unit-census h3 { margin: 0 0 10px; font-size: 16px; }
+.unit-census table { border: 0; }
+.unit-census th, .unit-census td { font-size: 13px; }
+.unit-census tr.total td { font-weight: 650; background: #f7f7f8; }
 .unit { margin-bottom: 30px; }
 .unit > h2 { font-size: 18px; border: 0; border-left: 4px solid var(--accent); padding: 2px 0 2px 12px; margin-bottom: 14px; }
 .bed { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px; margin-bottom: 12px; box-shadow: 0 5px 18px rgba(20, 20, 22, .03); }
@@ -114,6 +123,19 @@ def _format_datetime_br(value: str | None) -> str:
     if parsed.hour == 0 and parsed.minute == 0 and parsed.second == 0:
         return parsed.strftime("%d/%m/%Y")
     return parsed.strftime("%d/%m/%Y %H:%M")
+
+
+# UI-008 (pedido do pagador, 2026-09-07): paciente que a IA ainda não
+# analisou dizia só um traço/"sem contextualização" -- agora diz o motivo.
+AWAITING_AI_TEXT = "Aguardando análise de IA"
+
+
+def _format_median_hours(hours: float | None) -> str:
+    """UI-008: o pagador leu "tempo indeterminado" na mediana como defeito.
+    Sem pendência resolvida ainda não há mediana -- diz isso, não um traço."""
+    if hours is None:
+        return "sem histórico ainda"
+    return _format_hours(hours)
 
 
 def _format_hours(hours: float | None) -> str:
@@ -393,7 +415,9 @@ def _render_census_row(bed: str, unit: str, admission_date: str | None, state, a
     cada linha, dois leitos com o mesmo rótulo (ex. "2A") em setores
     diferentes ficam indistinguíveis."""
     dih = _dih(admission_date)
-    context = (state["clinical_context"] if state else None) or "(sem contextualização)"
+    context = (state["clinical_context"] if state else None) or (
+        AWAITING_AI_TEXT if state is None else "(sem contextualização)"
+    )
     context_short = (context[:80] + "…") if len(context) > 80 else context
 
     if annotated_items:
@@ -459,9 +483,9 @@ def _render_service_indicators(
   <div class="stat"><span class="n">{pct.pct_patients_with_active_pending}%</span>Com pendência ativa</div>
   <div class="stat"><span class="n">{pct.pct_patients_without_edd}%</span>Sem EDD documentada</div>
   <div class="stat"><span class="n">{pct.pct_patients_with_edd_overdue}%</span>EDD vencida</div>
-  <div class="stat compact"><span class="n">{_format_hours(pct.median_resolution_hours)}</span>Tempo mediano de resolução</div>
-  <div class="stat"><span class="n">{pct.patients_dia_vermelho}</span>Dia vermelho hoje</div>
-  <div class="stat"><span class="n">{pct.patients_dia_verde}</span>Dia verde hoje</div>
+  <div class="stat compact"><span class="n">{_format_median_hours(pct.median_resolution_hours)}</span>Tempo mediano de resolução<small>horas entre o registro da pendência pela auditoria e sua resolução nas evoluções</small></div>
+  <div class="stat dia-vermelho"><span class="n">{pct.patients_dia_vermelho}</span>Dia vermelho hoje</div>
+  <div class="stat dia-verde"><span class="n">{pct.patients_dia_verde}</span>Dia verde hoje</div>
 </div>"""
 
     by_category_hours = {
@@ -488,18 +512,31 @@ def _render_service_indicators(
             f"<td class=\"prio-MONITORAMENTO\">{row.by_priority.get('MONITORAMENTO', 0)}</td></tr>"
             for row in unit_census
         )
+        # UI-008: linha de total -- a visão "em poucos segundos" do dia inteiro.
+        total_row = (
+            f"<tr class=\"total\"><td>Total</td><td>{sum(r.patient_count for r in unit_census)}</td>"
+            f"<td>{sum(r.patients_with_active_pending for r in unit_census)}</td>"
+            f"<td>{sum(r.active_pending_count for r in unit_census)}</td>"
+            f"<td class=\"prio-ALTA\">{sum(r.by_priority.get('ALTA', 0) for r in unit_census)}</td>"
+            f"<td class=\"prio-MEDIA\">{sum(r.by_priority.get('MEDIA', 0) for r in unit_census)}</td>"
+            f"<td class=\"prio-MONITORAMENTO\">{sum(r.by_priority.get('MONITORAMENTO', 0) for r in unit_census)}</td></tr>"
+        )
         census_html = (
             "<table><tr><th>Unidade</th><th>Pacientes</th><th>Com pendência ativa</th>"
             "<th>Pendências ativas</th><th>Alta</th><th>Média</th><th>Monitoramento</th></tr>"
-            f"{rows}</table>"
+            f"{rows}{total_row}</table>"
         )
 
+    # UI-008 (pedido do pagador: "censo por unidade: muito importante"): em
+    # destaque, ANTES dos demais indicadores, com moldura própria.
     return f"""<div class="indicators">
   <h2>Indicadores do serviço</h2>
+  <div class="unit-census">
+    <h3>Censo agregado por unidade</h3>
+    {census_html}
+  </div>
   {summary}
   <div class="indicators-breakdown">{blocks}</div>
-  <h3>Censo agregado por unidade</h3>
-  {census_html}
 </div>"""
 
 
@@ -509,7 +546,10 @@ def _render_bed(
     dih = _dih(admission_date)
     dih_label = f"{dih}º DIH" if dih is not None else "DIH não determinado"
 
-    clinical_context = html.escape(state["clinical_context"]) if state and state["clinical_context"] else "(sem contextualização disponível)"
+    if state and state["clinical_context"]:
+        clinical_context = html.escape(state["clinical_context"])
+    else:
+        clinical_context = AWAITING_AI_TEXT if state is None else "(sem contextualização disponível)"
 
     necessidade_code = state["necessidade_hospitalar"] if state else None
     necessidade_label = NECESSIDADE_LABELS.get(necessidade_code, "não avaliada ainda")

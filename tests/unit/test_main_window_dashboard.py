@@ -298,3 +298,57 @@ def test_refresh_dashboard_survives_transient_database_failure(tmp_path, monkeyp
         assert window._kpi_labels["total_active"]["text"] == "2"  # mantém o último valor renderizado
     finally:
         root.destroy()
+
+
+def test_unit_census_card_shows_table_and_expands_into_its_own_window(tmp_path, monkeypatch):
+    """UI-008 (pedido do pagador: "censo por unidade: muito importante"):
+    tabelinha em destaque na tela principal (unidades + total) e botão
+    "Ampliar" que abre a tabela inteira numa janela própria, reaproveitada
+    se já estiver aberta."""
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path / "GSUSAuditoria"))
+    _seed_two_patients()
+
+    root = tk.Tk()
+    try:
+        window = MainWindow(root, config.AppConfig(configured=True, unit="2A"))
+        root.update()
+
+        rows = window._unit_tree.get_children()
+        assert len(rows) == 2  # 1 unidade + linha de total
+        unit_values = window._unit_tree.item(rows[0], "values")
+        assert (unit_values[0], unit_values[1], unit_values[2]) == ("2A", "2", "1")
+        assert window._unit_tree.item(rows[1], "values")[0] == "Total"
+        assert "2 pacientes ativos" in window._unit_strip["text"]
+
+        window._open_unit_census_window()
+        root.update()
+        assert window._unit_window.winfo_exists()
+        assert len(window._unit_window_tree.get_children()) == 2
+        first_window = window._unit_window
+        window._open_unit_census_window()  # segunda chamada: mesma janela, só traz pra frente
+        assert window._unit_window is first_window
+    finally:
+        root.destroy()
+
+
+def test_census_tree_says_awaiting_ai_instead_of_a_dash_for_unanalyzed_patient(tmp_path, monkeypatch):
+    """UI-008: o pagador perguntou o que era o traço no painel -- paciente
+    que a IA ainda não analisou agora diz "Aguardando análise de IA";
+    quem já foi analisado mantém o traço só onde de fato não há dado."""
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path / "GSUSAuditoria"))
+    _seed_two_patients()
+
+    root = tk.Tk()
+    try:
+        window = MainWindow(root, config.AppConfig(configured=True, unit="2A"))
+        root.update()
+        columns = list(window._census_tree["columns"])
+        unanalyzed = window._census_tree.item("100", "values")
+        analyzed = window._census_tree.item("200", "values")
+        assert unanalyzed[columns.index("context")] == "Aguardando análise de IA"
+        assert unanalyzed[columns.index("dia")] == "Aguardando análise de IA"
+        assert analyzed[columns.index("context")] == "Contexto."
+        assert analyzed[columns.index("dia")] == "—"
+        assert window._kpi_labels["median_resolution"]["text"] == "sem histórico ainda"
+    finally:
+        root.destroy()

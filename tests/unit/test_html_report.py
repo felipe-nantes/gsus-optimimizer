@@ -433,3 +433,28 @@ def test_report_lists_recent_admissions_awaiting_notes_outside_failures(tmp_path
     assert "prontuário 333" in content
     assert "admitido em 08/09/2026" in content
     assert "Prontuários não processados" not in content
+
+
+def test_report_names_ai_wait_colors_day_counts_and_highlights_unit_census(tmp_path):
+    """UI-008 (pedidos do pagador, 2026-09-07): paciente ainda não analisado
+    diz "Aguardando análise de IA" (não um traço), os números de dia
+    vermelho/verde levam a cor do conceito, o censo por unidade vem em
+    destaque com linha de total, e a mediana sem dado explica o porquê."""
+    repo = _setup_repo(tmp_path)
+    patient = repo.upsert_patient(Patient(record_number="111", bed="2A", unit="Clínica Médica"))
+    repo.add_pending_item(patient, "INTERCONSULTA", "Aguarda parecer", "Solicitado parecer.", "2026-08-20T10:31:00")
+    run_id = repo.start_run()
+    repo.enqueue_patients(run_id, [patient])
+    repo.mark_processing(run_id, patient)
+    repo.mark_done(run_id, patient)
+
+    content = generate_report(repo, run_id, "Clínica Médica", tmp_path / "relatorio.html").read_text(encoding="utf-8")
+
+    assert content.count("Aguardando análise de IA") >= 2  # censo + relatório individual
+    assert '<div class="stat dia-vermelho">' in content
+    assert '<div class="stat dia-verde">' in content
+    assert '<div class="unit-census">' in content
+    assert content.index('<div class="unit-census">') < content.index("Com pendência ativa</div>")
+    assert '<tr class="total"><td>Total</td><td>1</td>' in content
+    assert "sem histórico ainda" in content
+    assert "tempo indeterminado" not in content.split("Censo de pendências")[0]

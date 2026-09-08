@@ -146,6 +146,20 @@ CENSUS_COLUMNS = [
 
 CONTEXT_MAX_CHARS = 80  # mesmo corte de html_report.py::_render_census_row
 
+# UI-008 (pedidos do pagador, 2026-09-07): paciente ainda não analisado pela IA
+# mostrava só um traço; e o censo por unidade ("muito importante") vira uma
+# tabelinha em destaque com opção de ampliar numa janela própria.
+AWAITING_AI_TEXT = "Aguardando análise de IA"
+UNIT_CENSUS_COLUMNS = [
+    ("unit", "Unidade", 200),
+    ("patients", "Pacientes", 90),
+    ("with_pending", "Com pendência", 110),
+    ("pending", "Pendências ativas", 120),
+    ("alta", "Alta", 70),
+    ("media", "Média", 70),
+    ("monit", "Monitoramento", 110),
+]
+
 
 def _format_hours(hours: float | None) -> str:
     if hours is None:
@@ -154,6 +168,14 @@ def _format_hours(hours: float | None) -> str:
         return f"~{round(hours)}h"
     days, remainder_hours = divmod(hours, 24)
     return f"~{int(days)}d {round(remainder_hours)}h"
+
+
+def _format_median_hours(hours: float | None) -> str:
+    """UI-008: sem pendência resolvida ainda não existe mediana -- diz isso
+    em vez de um traço (o pagador leu o traço como defeito)."""
+    if hours is None:
+        return "sem histórico ainda"
+    return _format_hours(hours)
 
 
 def _format_edd_cell(edd_status: str | None, edd_overdue: bool) -> str:
@@ -542,8 +564,11 @@ class MainWindow:
                 top, "arrow", size=26, color=KPI_ACCENTS.get(key, TEXT_PRIMARY),
                 background=CARD_BG, badge_background=SURFACE_SUBTLE,
             ).pack(side="right")
+            # UI-008: o número de dia vermelho na cor do próprio conceito
+            # (pedido do pagador); os demais seguem neutros.
             value_label = tk.Label(
-                body, text="—", font=(FONT_FAMILY, 21, "bold"), bg=CARD_BG, fg=TEXT_PRIMARY,
+                body, text="—", font=(FONT_FAMILY, 21, "bold"), bg=CARD_BG,
+                fg=KPI_ACCENTS[key] if key == "dia_vermelho" else TEXT_PRIMARY,
             )
             value_label.pack(anchor="w", pady=(1, 4))
             tk.Frame(body, bg=CARD_BORDER, height=1).pack(fill="x")
@@ -648,11 +673,81 @@ class MainWindow:
         ax.title.set_position((0, 1.0))
 
     def _build_unit_strip(self, root: tk.Tk) -> None:
+        """UI-008: censo por unidade como tabelinha em destaque (até 3 linhas
+        visíveis aqui) + botão "Ampliar" que abre a tabela inteira numa
+        janela própria -- pedido explícito do pagador ("muito importante")."""
+        self._unit_census_rows = []
+        self._unit_window = None
+        self._unit_window_tree = None
+        card = tk.Frame(root, bg=BRAND_SOFT, highlightbackground=CARD_BORDER, highlightthickness=1)
+        card.grid(row=5, column=0, sticky="ew", padx=18, pady=(0, 7))
+        card.grid_columnconfigure(0, weight=1)
+        header = tk.Frame(card, bg=BRAND_SOFT)
+        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(7, 3))
+        tk.Label(
+            header, text="Censo por unidade", font=(FONT_FAMILY, 10, "bold"), fg=BRAND_COLOR_DARK, bg=BRAND_SOFT,
+        ).pack(side="left")
         self._unit_strip = tk.Label(
-            root, text="", font=(FONT_FAMILY, 9), fg=BRAND_COLOR_DARK, bg=BRAND_SOFT,
-            justify="left", anchor="w", wraplength=1180, padx=12, pady=7,
+            header, text="", font=(FONT_FAMILY, 9), fg=BRAND_COLOR_DARK, bg=BRAND_SOFT, anchor="w",
         )
-        self._unit_strip.grid(row=5, column=0, sticky="ew", padx=18, pady=(0, 7))
+        self._unit_strip.pack(side="left", padx=(10, 0))
+        self._unit_expand_button = ttk.Button(header, text="Ampliar", command=self._open_unit_census_window)
+        self._unit_expand_button.pack(side="right")
+        self._unit_tree = self._make_unit_tree(card, height=1)
+        self._unit_tree.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+
+    def _make_unit_tree(self, parent, height: int) -> ttk.Treeview:
+        columns = [col_id for col_id, _label, _width in UNIT_CENSUS_COLUMNS]
+        tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="none", height=height)
+        for col_id, label, width in UNIT_CENSUS_COLUMNS:
+            tree.heading(col_id, text=label)
+            tree.column(col_id, width=width, anchor="w" if col_id == "unit" else "center")
+        tree.tag_configure("total", font=(FONT_FAMILY, 9, "bold"))
+        return tree
+
+    @staticmethod
+    def _fill_unit_tree(tree: ttk.Treeview, unit_census) -> None:
+        tree.delete(*tree.get_children())
+        for row in unit_census:
+            tree.insert("", "end", values=(
+                row.unit, row.patient_count, row.patients_with_active_pending, row.active_pending_count,
+                row.by_priority.get("ALTA", 0), row.by_priority.get("MEDIA", 0),
+                row.by_priority.get("MONITORAMENTO", 0),
+            ))
+        if unit_census:
+            tree.insert("", "end", tags=("total",), values=(
+                "Total",
+                sum(r.patient_count for r in unit_census),
+                sum(r.patients_with_active_pending for r in unit_census),
+                sum(r.active_pending_count for r in unit_census),
+                sum(r.by_priority.get("ALTA", 0) for r in unit_census),
+                sum(r.by_priority.get("MEDIA", 0) for r in unit_census),
+                sum(r.by_priority.get("MONITORAMENTO", 0) for r in unit_census),
+            ))
+
+    def _open_unit_census_window(self) -> None:
+        """UI-008: a tabela inteira do censo por unidade, ampliada, em janela
+        própria (a mesma janela é reaproveitada enquanto estiver aberta)."""
+        if self._unit_window is not None and self._unit_window.winfo_exists():
+            self._fill_unit_tree(self._unit_window_tree, self._unit_census_rows)
+            self._unit_window.lift()
+            return
+        window = tk.Toplevel(self.root)
+        window.title("Censo por unidade")
+        window.configure(bg=BG_COLOR)
+        window.geometry("820x460")
+        tk.Label(
+            window, text="Censo por unidade", font=(FONT_FAMILY, 14, "bold"), fg=TEXT_PRIMARY, bg=BG_COLOR,
+        ).pack(anchor="w", padx=18, pady=(16, 2))
+        tk.Label(
+            window, font=(FONT_FAMILY, 9), fg=TEXT_MUTED, bg=BG_COLOR,
+            text="Pacientes ativos e pendências por unidade, a partir da base local (atualiza a cada execução).",
+        ).pack(anchor="w", padx=18, pady=(0, 10))
+        tree = self._make_unit_tree(window, height=max(6, len(self._unit_census_rows) + 1))
+        tree.pack(fill="both", expand=True, padx=18, pady=(0, 16))
+        self._fill_unit_tree(tree, self._unit_census_rows)
+        self._unit_window = window
+        self._unit_window_tree = tree
 
     def _build_census_table(self, root: tk.Tk) -> None:
         frame = tk.Frame(root, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
@@ -917,7 +1012,7 @@ class MainWindow:
         )
         self._kpi_labels["dia_vermelho"].config(text=str(indicators.patients_dia_vermelho))
         self._kpi_labels["dia_verde"].config(text=str(indicators.patients_dia_verde))
-        self._kpi_labels["median_resolution"].config(text=_format_hours(indicators.median_resolution_hours))
+        self._kpi_labels["median_resolution"].config(text=_format_median_hours(indicators.median_resolution_hours))
 
     def _render_charts(self, indicators: dashboard_metrics.ServiceIndicators, snapshots) -> None:
         self._charts_compact_label.config(
@@ -1046,14 +1141,21 @@ class MainWindow:
         ax.set_xticklabels([label[3:5] + "/" + label[:2] for label in labels[::step]], rotation=0)
 
     def _render_unit_strip(self, unit_census) -> None:
+        self._unit_census_rows = list(unit_census)
         if not unit_census:
-            self._unit_strip.config(text="Censo por unidade: sem pacientes ativos.")
-            return
-        parts = [
-            f"{row.unit}: {row.patient_count} pac. ({row.patients_with_active_pending} c/ pendência)"
-            for row in unit_census
-        ]
-        self._unit_strip.config(text="Censo por unidade  —  " + "   |   ".join(parts))
+            self._unit_strip.config(text="— sem pacientes ativos")
+        else:
+            self._unit_strip.config(
+                text=f"— {len(unit_census)} unidade(s), "
+                f"{sum(r.patient_count for r in unit_census)} pacientes ativos"
+            )
+        # Até 3 unidades visíveis na tela principal (mais o total); o resto
+        # fica a um clique em "Ampliar" -- a área da tabela de pacientes
+        # abaixo não pode encolher em tela de notebook.
+        self._unit_tree.configure(height=max(1, min(len(unit_census) + 1, 4)))
+        self._fill_unit_tree(self._unit_tree, unit_census)
+        if self._unit_window is not None and self._unit_window.winfo_exists():
+            self._fill_unit_tree(self._unit_window_tree, unit_census)
 
     # ------------------------------------------------------- tabela censo
     def _apply_census_filter(self) -> None:
@@ -1118,14 +1220,14 @@ class MainWindow:
                 row.record_number,
                 row.unit,
                 row.dih if row.dih is not None else "?",
-                context_short or "—",
+                context_short or ("—" if row.analyzed else AWAITING_AI_TEXT),
                 row.main_description or "Sem pendências identificadas",
                 row.main_category or "—",
                 row.main_priority,
                 row.active_pending_count,
                 _format_hours(row.hours_elapsed),
                 _format_edd_cell(row.edd_status, row.edd_overdue),
-                row.dia_classificacao or "—",
+                row.dia_classificacao or ("—" if row.analyzed else AWAITING_AI_TEXT),
             )
             stripe = "evenrow" if i % 2 == 0 else "oddrow"
             self._census_tree.insert("", "end", iid=row.record_number, values=values, tags=(row.main_priority, stripe))
