@@ -636,6 +636,13 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  porta real + só mata processo que É llama-server.
 [x] RESIL-018    Resgate de IA também pra paciente com evolução gravada depois da última análise
                  (2026-09-08, DEC-124) -- antes só quem nunca fora analisado voltava à fila.
+[x] RESIL-019    Relogin do GSUS em contexto NOVO do navegador (2026-09-08, DEC-127): 8 de 8 relogins
+                 na mesma sessão falharam com "pop-up não abriu" no fim do censo; contexto limpo
+                 loga de primeira. PENDENTE: confirmar na próxima degradação real de fim de censo.
+[ ] RESIL-020    Degradação do GSUS após ~170 prontuários numa sessão (2026-09-08, duas execuções):
+                 investigar se é sessão/servidor ou o navegador (memória) e, se for o navegador,
+                 reciclar o contexto preventivamente a cada N pacientes. `TargetClosedError` (aba
+                 fechada) também candidato a `KNOWN_GSUS_ERROR_PATTERNS`.
 [x] RESIL-014    Acordeão exclusivo fecha o card da internação atual após `_expand_all` (achado real
                  2026-09-07, DEC-120): `_ensure_episode_expanded` reabre só o card identificado.
                  Clique de menu por texto usa o primeiro elemento VISÍVEL (item duplicado no GSUS

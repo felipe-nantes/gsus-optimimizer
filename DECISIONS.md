@@ -2334,3 +2334,16 @@ Assimetria de risco deliberada: um falso positivo aqui (tratar um censo genuinam
 **Verificação:** +23 casos de parser, +2 orchestrator, +1 repositório, +1 relatório. **Impacto:** `app/analysis/edd.py` (novo), `app/orchestrator.py`, `app/storage/{repository,database}.py`, `app/reports/{html_report,dashboard_metrics}.py`, `app/ui/main_window.py`. Instalador 1.5.0.
 
 **Adendo DEC-126 (mesma tarde, cobertura real):** medição nas 323 evoluções de 2026 com menção a alta (só contagens e janelas mascaradas, nunca texto): a primeira versão reconhecia 78; a forma mais comum de MED/CIR era `previsão de alta: dia 30/08/26` (dois separadores seguidos + ano de 2 dígitos) e ficava de fora. Ajustes: sequência de separadores em `_EXPLICIT`; `alta em/para dd/mm` vale como previsão só quando a data ainda não passou (no passado é relato de história, ex. "alta em 11/07, retornou em 13/07"); rolagem pro ano seguinte limitada a 90 dias (uma data passada escrita em setembro é previsão vencida, não março do ano que vem). Resultado: 139 de 323 inferíveis; as restantes são negação ("sem previsão"), história ou texto sem data -- corretas de fora. Instalador 1.5.1.
+
+---
+
+## DEC-127 — Relogin do GSUS num contexto NOVO do navegador, nunca numa aba do mesmo contexto (RESIL-019)
+
+**Contexto (2026-09-08, duas execuções reais seguidas):** perto do fim do censo (~170 prontuários, mais de 1 h de sessão) a tela de busca parou de responder; o adapter refez o login numa aba nova do MESMO contexto e os 8 relogins do dia falharam todos com "pop-up do sistema não abriu" (7 na execução das 11:43, 1 no disjuntor da execução das 12:54), transformando o fim do censo em `GSUSLoginError`/`GSUSSearchUnresponsiveError` e, na segunda, abortando a execução pelo disjuntor (DEC-117) antes do resgate de IA. Minutos depois, um processo novo (contexto novo) logou de primeira -- a diferença está no contexto: cookies da sessão antiga e janelas do GSUS ainda abertas impedem o clique de login de abrir o pop-up que `login()` espera.
+
+**Decisões:**
+1. `_relogin` cria um contexto novo (`browser.new_context()`, sessão limpa), aplica o mesmo timeout padrão do contexto original (`context_timeout_ms`, passado por `update_flow`), loga nele e só então fecha o contexto antigo com todas as abas. Se o login falhar, o contexto novo é descartado e o antigo permanece -- nunca sem página.
+2. Contexto sem `browser` (fakes) mantém o caminho antigo de aba nova.
+3. Mesmo instalador 1.5.1 (nunca instalado antes desta correção).
+
+**Verificação:** +3 testes de adapter (sucesso, falha, fallback). Validação real: a execução seguinte, se a degradação de fim de censo se repetir. **Impacto:** `app/gsus/adapter.py`, `app/update_flow.py`.
