@@ -249,3 +249,83 @@ def test_reset_session_is_noop_before_first_login(monkeypatch):
 
     assert adapter._page is page
     assert page.closed is False
+
+
+# ------------------------------------------------- RESIL-019: contexto novo
+class _FakeContextWithBrowser(_FakeContext):
+    def __init__(self, new_page, browser):
+        super().__init__(new_page)
+        self.browser = browser
+        self.closed = False
+        self.default_timeout = None
+
+    def close(self):
+        self.closed = True
+
+    def set_default_timeout(self, ms):
+        self.default_timeout = ms
+
+
+class _FakeBrowser:
+    def __init__(self, fresh_page):
+        self.fresh_page = fresh_page
+        self.contexts = []
+
+    def new_context(self):
+        ctx = _FakeContextWithBrowser(self.fresh_page, self)
+        self.contexts.append(ctx)
+        return ctx
+
+
+def test_relogin_uses_a_fresh_browser_context_and_closes_the_old_one_after_success(monkeypatch):
+    """Achado real 2026-09-08: relogar numa aba do MESMO contexto falhou 8 de 8
+    vezes ("pop-up do sistema não abriu"); um contexto novo é uma sessão limpa."""
+    fresh_page = _FakePage()
+    browser = _FakeBrowser(fresh_page)
+    old_context = _FakeContextWithBrowser(_FakePage(), browser)
+    old_page = _FakePage(context=old_context)
+    relogged_page = _FakePage()
+    monkeypatch.setattr(adapter_module.gsus_login, "login", lambda page, u, p: relogged_page)
+
+    adapter = GSUSAdapter(old_page, "12345678900", "senha", "Auditoria", base_url="https://gsus.pr.gov.br", context_timeout_ms=45_000)
+    adapter._relogin()
+
+    assert len(browser.contexts) == 1
+    assert browser.contexts[0].default_timeout == 45_000
+    assert fresh_page.goto_calls == [("https://gsus.pr.gov.br", "load")]
+    assert adapter._page is relogged_page
+    assert old_context.closed is True          # sessão antiga (cookies + janelas) descartada
+    assert old_context.new_page_calls == 0     # nunca mais reaproveita o contexto antigo
+    assert browser.contexts[0].closed is False
+
+
+def test_relogin_discards_the_fresh_context_and_keeps_the_old_one_when_login_fails(monkeypatch):
+    browser = _FakeBrowser(_FakePage())
+    old_context = _FakeContextWithBrowser(_FakePage(), browser)
+    old_page = _FakePage(context=old_context)
+
+    def _fail(page, u, p):
+        raise GSUSLoginError("simulado: pop-up não abriu")
+
+    monkeypatch.setattr(adapter_module.gsus_login, "login", _fail)
+    adapter = _make_adapter(old_page)
+
+    with pytest.raises(GSUSLoginError):
+        adapter._relogin()
+
+    assert browser.contexts[0].closed is True
+    assert old_context.closed is False
+    assert adapter._page is old_page
+
+
+def test_relogin_falls_back_to_a_new_page_when_the_context_has_no_browser(monkeypatch):
+    """Fakes antigos (sem `browser`) continuam no caminho de aba nova."""
+    new_page = _FakePage()
+    old_page = _FakePage(context=_FakeContext(new_page))
+    monkeypatch.setattr(adapter_module.gsus_login, "login", lambda page, u, p: _FakePage())
+
+    adapter = _make_adapter(old_page)
+    adapter._relogin()
+
+    assert new_page.goto_calls == [("https://gsus.pr.gov.br", "load")]
+    assert old_page.closed is True

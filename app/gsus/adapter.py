@@ -45,8 +45,12 @@ class GSUSAdapter:
     def __init__(
         self, page: Page, username: str, password: str, unit: str,
         base_url: str | None = None, max_days_per_patient: int | None = None,
+        context_timeout_ms: int | None = None,
     ):
         self._page = page
+        # RESIL-019: o contexto novo criado no relogin precisa do mesmo timeout
+        # padrão que `GSUSClient` deu ao contexto original.
+        self._context_timeout_ms = context_timeout_ms
         self._username = username
         self._password = password
         self._unit = unit
@@ -120,25 +124,54 @@ class GSUSAdapter:
         return self._session_expired() or self._tab_crashed()
 
     def _relogin(self) -> None:
-        """Refaz o login do zero numa aba NOVA do mesmo contexto do
-        navegador (a aba antiga, já com sessão morta, é descartada -- não
-        dá pra reaproveitá-la pra logar de novo, `login()` espera a tela
-        inicial do SSO). Fecha a aba antiga só depois do novo login
-        confirmado, pra nunca ficar sem nenhuma página utilizável se o
-        relogin falhar."""
+        """Refaz o login do zero num CONTEXTO NOVO do navegador (RESIL-019).
+
+        Achado real 2026-09-08 (duas execuções, 8 relogins em 8 falharam):
+        relogar numa aba do MESMO contexto nunca funcionou -- os cookies da
+        sessão antiga e as janelas do GSUS ainda abertas fazem o clique de
+        login não abrir o pop-up ("pop-up do sistema não abriu"), enquanto o
+        primeiro login de um processo novo entrava de primeira. Um contexto
+        novo (`browser.new_context()`) é uma sessão limpa: sem cookies, sem
+        janelas antigas. O contexto antigo (com todas as suas abas) só é
+        fechado depois do novo login confirmado; se o login falhar, o
+        contexto novo é descartado e o antigo permanece -- nunca ficamos sem
+        página. Sem acesso ao navegador (fakes de teste, ou contexto sem
+        `browser`), cai no caminho antigo: aba nova no mesmo contexto."""
         if not self._base_url:
             raise gsus_login.GSUSLoginError(
                 "Sessão GSUS expirou e não é possível refazer login automaticamente "
                 "(base_url não configurada)."
             )
         old_page = self._page
-        new_page = old_page.context.new_page()
-        new_page.goto(self._base_url, wait_until="load")
-        self._page = gsus_login.login(new_page, self._username, self._password)
+        old_context = old_page.context
+        browser = getattr(old_context, "browser", None)
+        if browser is None:
+            new_page = old_context.new_page()
+            new_page.goto(self._base_url, wait_until="load")
+            self._page = gsus_login.login(new_page, self._username, self._password)
+            try:
+                old_page.close()
+            except PlaywrightError:
+                pass
+            return
+        new_context = browser.new_context()
         try:
-            old_page.close()
+            if self._context_timeout_ms is not None:
+                new_context.set_default_timeout(self._context_timeout_ms)
+            new_page = new_context.new_page()
+            new_page.goto(self._base_url, wait_until="load")
+            self._page = gsus_login.login(new_page, self._username, self._password)
+        except Exception:
+            try:
+                new_context.close()
+            except PlaywrightError:
+                pass
+            raise
+        try:
+            old_context.close()
         except PlaywrightError:
             pass
+        logger.info("Relogin do GSUS feito num contexto novo do navegador; contexto antigo fechado.")
 
     def reset_session(self) -> None:
         """DEC-117 (achado real 2026-09-04): refaz o login numa aba nova

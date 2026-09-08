@@ -193,6 +193,7 @@ def _run_update_locked(
             adapter = GSUSAdapter(
                 client.page, username, password, app_config.unit,
                 base_url=client.base_url, max_days_per_patient=app_config.max_days_per_patient,
+                context_timeout_ms=client.timeout_ms,  # RESIL-019: contexto novo no relogin
             )
             result = run_once(
                 repo,
