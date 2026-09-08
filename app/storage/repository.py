@@ -490,6 +490,7 @@ class Repository:
         dia_causa: str | None = None,
         model_version: str | None = None,
         analysis_window_limited: bool = False,
+        edd_inferred: bool = False,
     ) -> None:
         """Campos a partir de `especialidade_responsavel` são do modelo de
         auditoria concorrente (RF-20 a RF-28, DEC-057) -- todos opcionais
@@ -516,8 +517,8 @@ class Repository:
             "  especialidade_responsavel, origem_internacao,"
             "  necessidade_hospitalar, necessidade_hospitalar_justificativa,"
             "  objetivo_terapeutico, proximo_passo, edd_data, edd_status,"
-            "  dia_classificacao, dia_causa, model_version, analysis_window_limited"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "  dia_classificacao, dia_causa, model_version, analysis_window_limited, edd_inferida"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(patient_id) DO UPDATE SET "
             "  clinical_context = excluded.clinical_context,"
             "  current_status = excluded.current_status,"
@@ -547,6 +548,10 @@ class Repository:
             "  edd_status = CASE WHEN excluded.edd_data IS NULL "
             "    THEN COALESCE(patient_state.edd_status, excluded.edd_status) "
             "    ELSE excluded.edd_status END,"
+            # EDD-001: a origem (inferida de previsão relativa ou não) acompanha
+            # a MESMA regra de preservação da data.
+            "  edd_inferida = CASE WHEN excluded.edd_data IS NULL "
+            "    THEN patient_state.edd_inferida ELSE excluded.edd_inferida END,"
             "  dia_classificacao = excluded.dia_classificacao,"
             "  dia_causa = excluded.dia_causa,"
             "  model_version = COALESCE(excluded.model_version, patient_state.model_version)",
@@ -556,6 +561,7 @@ class Repository:
                 necessidade_hospitalar, necessidade_hospitalar_justificativa,
                 objetivo_terapeutico, proximo_passo, edd_data, edd_status,
                 dia_classificacao, dia_causa, model_version, int(analysis_window_limited),
+                int(edd_inferred),
             ),
         )
         self.conn.commit()

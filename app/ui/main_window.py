@@ -178,12 +178,13 @@ def _format_median_hours(hours: float | None) -> str:
     return _format_hours(hours)
 
 
-def _format_edd_cell(edd_status: str | None, edd_overdue: bool) -> str:
+def _format_edd_cell(edd_status: str | None, edd_overdue: bool, inferred: bool = False) -> str:
+    suffix = " (relativa)" if inferred else ""  # EDD-001: origem visível
     if edd_overdue:
-        return "VENCIDA"
+        return "VENCIDA" + suffix
     if edd_status is None or edd_status == "NAO_REGISTRADA":
         return "não documentada"
-    return "em dia"
+    return "em dia" + suffix
 
 
 def configure_app_style() -> None:
@@ -1226,7 +1227,7 @@ class MainWindow:
                 row.main_priority,
                 row.active_pending_count,
                 _format_hours(row.hours_elapsed),
-                _format_edd_cell(row.edd_status, row.edd_overdue),
+                _format_edd_cell(row.edd_status, row.edd_overdue, row.edd_inferred),
                 row.dia_classificacao or ("—" if row.analyzed else AWAITING_AI_TEXT),
             )
             stripe = "evenrow" if i % 2 == 0 else "oddrow"

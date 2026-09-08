@@ -149,7 +149,8 @@ CREATE TABLE IF NOT EXISTS patient_state (
     dia_classificacao                       TEXT,
     dia_causa                               TEXT,
     model_version                           TEXT,
-    analysis_window_limited                 INTEGER NOT NULL DEFAULT 0
+    analysis_window_limited                 INTEGER NOT NULL DEFAULT 0,
+    edd_inferida                            INTEGER NOT NULL DEFAULT 0
 );
 
 -- `category`/`evidence`/`evidence_date` são a categoria e a evidência
@@ -301,6 +302,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # (orchestrator.py) por causa de backlog grande -- relatório precisa
         # avisar que a análise é parcial (achado real, hardware fraco).
         "analysis_window_limited": "INTEGER NOT NULL DEFAULT 0",
+        # EDD-001: EDD convertida de previsão relativa na evolução (rotulada).
+        "edd_inferida": "INTEGER NOT NULL DEFAULT 0",
     }
     existing_state_columns = {row["name"] for row in conn.execute("PRAGMA table_info(patient_state)")}
     for column, sql_type in state_new_columns.items():

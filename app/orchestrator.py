@@ -23,6 +23,7 @@ from app.analysis import run_diagnosis
 from app.analysis.llm import LLMAnalysisError
 from app.analysis.priority import compute_priority, days_since_admission, hours_elapsed_since, pre_admission_cutoff_iso
 from app.analysis.rules import StructuredNote, apply_all_rules, most_recent_note
+from app.analysis.edd import infer_edd_from_notes
 from app.analysis.taxonomy import CATEGORY_INTERCONSULTA, CATEGORY_PROCEDIMENTO_CIRURGIA, default_origin
 from app.extraction.hashing import compute_note_hash
 from app.extraction.normalizer import (
@@ -1049,6 +1050,19 @@ def _run_llm_analysis(
     # adivinhar algo que já temos de forma confiável, RF-07/RF-08). Usa a
     # nota mais recente -- mesmo critério de recência do prompt (DEC-058).
     last_note = most_recent_note(new_notes)
+    # DEC-119: o contrato pede "AAAA-MM-DD", mas o modelo às vezes copia
+    # "DD/MM/AAAA" da evolução -- `is_edd_overdue` só lê ISO.
+    edd_data = normalize_iso_date(analysis.get("edd_data"))
+    edd_status = analysis["edd_status"]
+    edd_inferred = False
+    if edd_data is None:
+        # EDD-001 (pedido do pagador, 2026-09-07): sem data explícita, uma
+        # previsão RELATIVA escrita na evolução ("alta em 48h", "alta amanhã")
+        # é convertida de forma determinística a partir da data da própria
+        # evolução -- nunca pelo modelo -- e gravada como inferida.
+        inferred = infer_edd_from_notes(new_notes)
+        if inferred:
+            edd_data, edd_status, edd_inferred = inferred, "REGISTRADA", True
     repo.save_patient_state(
         patient_id, analysis["clinical_context"], analysis["current_status"],
         especialidade_responsavel=last_note.specialty if last_note else None,
@@ -1057,10 +1071,9 @@ def _run_llm_analysis(
         necessidade_hospitalar_justificativa=analysis["necessidade_hospitalar_justificativa"],
         objetivo_terapeutico=analysis["objetivo_terapeutico"],
         proximo_passo=analysis["proximo_passo"],
-        # DEC-119: o contrato pede "AAAA-MM-DD", mas o modelo às vezes copia
-        # "DD/MM/AAAA" da evolução -- `is_edd_overdue` só lê ISO.
-        edd_data=normalize_iso_date(analysis.get("edd_data")),
-        edd_status=analysis["edd_status"],
+        edd_data=edd_data,
+        edd_status=edd_status,
+        edd_inferred=edd_inferred,
         dia_classificacao=analysis["dia_classificacao"],
         dia_causa=analysis.get("dia_causa"),
         model_version=getattr(llm, "model_version", None),

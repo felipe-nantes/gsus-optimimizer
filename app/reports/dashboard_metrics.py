@@ -101,6 +101,8 @@ class PatientCensusRow:
     # UI-008 (pedido do pagador): False enquanto a IA ainda não analisou o
     # paciente -- a tela diz "Aguardando análise de IA" em vez de um traço.
     analyzed: bool = False
+    # EDD-001: a EDD veio de uma previsão relativa escrita na evolução.
+    edd_inferred: bool = False
 
 
 def compute_patient_census_rows(repo: Repository) -> list[PatientCensusRow]:
@@ -142,6 +144,7 @@ def compute_patient_census_rows(repo: Repository) -> list[PatientCensusRow]:
             edd_overdue=is_edd_overdue(edd_status, edd_data),
             dia_classificacao=state["dia_classificacao"] if state else None,
             analyzed=state is not None,
+            edd_inferred=bool(state["edd_inferida"]) if state else False,
         ))
     return rows
 

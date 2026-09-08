@@ -458,3 +458,17 @@ def test_report_names_ai_wait_colors_day_counts_and_highlights_unit_census(tmp_p
     assert '<tr class="total"><td>Total</td><td>1</td>' in content
     assert "sem histórico ainda" in content
     assert "tempo indeterminado" not in content.split("Censo de pendências")[0]
+
+
+def test_report_labels_edd_inferred_from_a_relative_forecast(tmp_path):
+    repo = _setup_repo(tmp_path)
+    patient = repo.upsert_patient(Patient(record_number="111", bed="2A", unit="Clínica Médica"))
+    repo.save_patient_state(patient, "ctx", "st", edd_data="2099-01-01", edd_status="REGISTRADA", edd_inferred=True)
+    run_id = repo.start_run()
+    repo.enqueue_patients(run_id, [patient])
+    repo.mark_processing(run_id, patient)
+    repo.mark_done(run_id, patient)
+
+    content = generate_report(repo, run_id, "Clínica Médica", tmp_path / "relatorio.html").read_text(encoding="utf-8")
+
+    assert "01/01/2099 (a partir de previsão relativa na evolução)" in content

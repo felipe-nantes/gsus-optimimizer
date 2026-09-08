@@ -147,7 +147,13 @@ def _format_hours(hours: float | None) -> str:
     return f"~{int(days)}d {round(remainder_hours)}h"
 
 
-def _format_edd(edd_status: str | None, edd_data: str | None) -> str:
+def _edd_origin_tag(inferred: bool) -> str:
+    """EDD-001: o auditor precisa saber que a data veio de um prazo relativo
+    escrito na evolução ("alta em 48h"), não de uma data explícita."""
+    return " (a partir de previsão relativa na evolução)" if inferred else ""
+
+
+def _format_edd(edd_status: str | None, edd_data: str | None, inferred: bool = False) -> str:
     # `is_edd_overdue` (app/analysis/priority.py) decide o QUE conta como
     # vencida -- compartilhado com o indicador agregado (REPORT-003) pra
     # nunca divergir do que este relatório individual mostra pro mesmo
@@ -159,8 +165,8 @@ def _format_edd(edd_status: str | None, edd_data: str | None) -> str:
             return html.escape(edd_data)
         if is_edd_overdue(edd_status, edd_data):
             diff = (date.today() - parsed).days
-            return f"{parsed.strftime('%d/%m')} — VENCIDA há {diff}d"
-        return parsed.strftime("%d/%m/%Y")
+            return f"{parsed.strftime('%d/%m')} — VENCIDA há {diff}d{_edd_origin_tag(inferred)}"
+        return parsed.strftime("%d/%m/%Y") + _edd_origin_tag(inferred)
     if edd_status == "VENCIDA" and edd_data:
         return f"{html.escape(edd_data)} — VENCIDA"
     return "não documentada"
@@ -560,7 +566,10 @@ def _render_bed(
 
     objetivo = html.escape(state["objetivo_terapeutico"]) if state and state["objetivo_terapeutico"] else "(não definido)"
     proximo_passo = html.escape(state["proximo_passo"]) if state and state["proximo_passo"] else "(não definido)"
-    edd_html = _format_edd(state["edd_status"] if state else None, state["edd_data"] if state else None)
+    edd_html = _format_edd(
+        state["edd_status"] if state else None, state["edd_data"] if state else None,
+        inferred=bool(state["edd_inferida"]) if state else False,
+    )
 
     dia = state["dia_classificacao"] if state else None
     day_badge = f'<span class="day-badge {html.escape(dia)}">DIA {html.escape(dia)}</span>' if dia else ""

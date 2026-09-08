@@ -679,3 +679,27 @@ def test_is_recent_admission_rejects_older_future_missing_or_garbage_dates():
     assert _is_recent_admission(None, today) is False
     assert _is_recent_admission("", today) is False
     assert _is_recent_admission("sem data", today) is False
+
+
+# ------------------------------------------------------------------ EDD-001
+def test_relative_discharge_forecast_fills_edd_when_llm_has_no_explicit_date(repo):
+    """Pedido do pagador (2026-09-07): "alta em 48h" na evolução conta como
+    EDD documentada -- convertida a partir da data da evolução, nunca pelo
+    modelo, e gravada como inferida."""
+    patient_id = repo.upsert_patient(_patient())
+    llm = StubLLMSequence([_base_analysis(edd_data=None, edd_status="NAO_REGISTRADA")])
+
+    _run_llm_analysis(repo, patient_id, llm, [_note(text="Estável. Previsão de alta em 48h.", timestamp="2026-09-08T10:00:00")])
+
+    state = repo.get_patient_state(patient_id)
+    assert (state["edd_data"], state["edd_status"], state["edd_inferida"]) == ("2026-09-10", "REGISTRADA", 1)
+
+
+def test_explicit_llm_edd_wins_over_relative_forecast_and_is_not_marked_inferred(repo):
+    patient_id = repo.upsert_patient(_patient())
+    llm = StubLLMSequence([_base_analysis(edd_data="2026-09-15", edd_status="REGISTRADA")])
+
+    _run_llm_analysis(repo, patient_id, llm, [_note(text="Previsão de alta em 48h.", timestamp="2026-09-08T10:00:00")])
+
+    state = repo.get_patient_state(patient_id)
+    assert (state["edd_data"], state["edd_inferida"]) == ("2026-09-15", 0)

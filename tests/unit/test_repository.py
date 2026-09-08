@@ -544,3 +544,18 @@ def test_pending_ai_analysis_includes_patient_with_notes_stored_after_last_analy
     repo.conn.commit()
 
     assert sorted(repo.get_active_patients_pending_ai_analysis()) == sorted([stale, never])
+
+
+def test_edd_inferred_flag_is_preserved_together_with_the_preserved_edd_date(repo):
+    """EDD-001: a origem da EDD segue a MESMA regra pegajosa da data (DEC-064)
+    -- uma análise seguinte sem EDD não apaga nem a data nem o rótulo."""
+    patient_id = repo.upsert_patient(_sample_patient())
+    repo.save_patient_state(patient_id, "ctx", "st", edd_data="2026-09-10", edd_status="REGISTRADA", edd_inferred=True)
+    repo.save_patient_state(patient_id, "ctx2", "st2", edd_data=None, edd_status="NAO_REGISTRADA")
+
+    state = repo.get_patient_state(patient_id)
+    assert (state["edd_data"], state["edd_status"], state["edd_inferida"]) == ("2026-09-10", "REGISTRADA", 1)
+
+    repo.save_patient_state(patient_id, "ctx3", "st3", edd_data="2026-09-12", edd_status="REGISTRADA")
+    state = repo.get_patient_state(patient_id)
+    assert (state["edd_data"], state["edd_inferida"]) == ("2026-09-12", 0)
