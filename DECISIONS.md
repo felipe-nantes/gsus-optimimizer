@@ -2256,3 +2256,79 @@ Assimetria de risco deliberada: um falso positivo aqui (tratar um censo genuinam
 **Impacto:** `app/gsus/records.py` (`_ensure_episode_expanded`, laço de `_collect_days`, `_click_menu_to_search_screen`), `app/gsus/census.py` (`_navigate_to_search_screen`), testes.
 
 **Adendo DEC-120 (mesma noite, DEC-120 adendo):** o reabre-card sozinho ainda perdia o dia mais recente: ao reabrir, o GSUS recria o dia auto-aberto com id novo, e a lista de dias feita antes ficava obsoleta pra esse dia (diagnóstico estrutural real, ver CURRENT_STATE 2026-09-07 (3)). Decisão 1b: relistar os dias (`_list_day_rows`) logo após `_ensure_episode_expanded` -- uma chamada JS, elimina a classe inteira de "dia de hoje pulado"; `_wait_visible` fica no laço como defesa adicional e um dia do card atual que siga oculto é logado, nunca pulado em silêncio. Lição de método: a validação real precisa checar o DADO gravado (datas das evoluções), não só "quantos pacientes concluíram" -- a execução 4 parecia boa por esse critério.
+
+---
+
+## DEC-121 — Admissão recente sem card ou sem evolução acessível é categoria benigna, não falha (RESIL-015)
+
+**Contexto (2026-09-08):** toda execução real desde o 1.4.0 terminava com "falhas" que não eram falhas: pacientes admitidos hoje/ontem cuja busca de prontuário não mostrava o card "Permanece Internado", ou cujo único dia no card ainda não tinha evolução. O banco confirma o padrão: 28 das 60 ocorrências históricas de "marcador não apareceu" e 32 das 45 de "nenhuma evolução encontrada" eram admissões de 0-1 dia. O auditor via isso em vermelho e o pagador perguntou o que significava.
+
+**Decisões:**
+1. **Duas subclasses com a MESMA mensagem.** `GSUSCurrentAdmissionNotFound` (busca rodou, marcador nunca apareceu -- diferente do disjuntor de menu, DEC-117) e `GSUSNoNotesToExtract` (card existe, nada capturado). As mensagens não mudam: `KNOWN_GSUS_ERROR_PATTERNS` continua casando quando o caso NÃO é benigno.
+2. **Quem decide é a data de admissão, no orchestrator.** `RECENT_ADMISSION_GRACE_DAYS = 1` (hoje ou ontem, via `days_since_admission`, formato real DD/MM/AAAA). Dentro da folga: `AWAITING_NOTES` (status de fila novo, contado à parte, bloco neutro no relatório com a data de admissão, citado no diagnóstico e na linha de status). Fora dela: ERROR como antes, porque aí o sinal aponta GSUS instável ou alta não refletida no censo. Data ausente/ilegível NUNCA vira benigno (na dúvida, erro visível). Data futura (erro de digitação) conta como recente -- `days_since_admission` trunca em 0.
+3. **Coluna `patients_awaiting_notes` em `runs`** (schema + migração idempotente). `get_run_counts` ganha a chave `awaiting_notes`; todos os testes que comparam o dicionário inteiro foram ajustados.
+
+**Verificação:** +9 testes (repositório, migração, diagnóstico, relatório, exceção distinta, helper de recência, 2 E2E). Validação real: ver CURRENT_STATE 2026-09-08.
+
+**Impacto:** `app/gsus/records.py`, `app/orchestrator.py`, `app/storage/{repository,database}.py`, `app/analysis/run_diagnosis.py`, `app/reports/html_report.py`, `app/ui/main_window.py`, testes.
+
+---
+
+## DEC-122 — Run abandonada por processo morto vira INTERRUPTED na execução seguinte (RESIL-016)
+
+**Contexto (2026-09-08):** 9 runs com status RUNNING e sem `finished_at` no banco real, todas de processos interrompidos no meio (máquina desligada, sessão de terminal fechada, kill manual). Ninguém nunca escrevia um status final.
+
+**Decisões:** `resume_incomplete_runs` (já chamado antes de `start_run`, sob o lock de execução única -- DEC-088) fecha toda run ainda RUNNING como `INTERRUPTED`, com `finished_at` e as contagens que a fila dela de fato alcançou. Os itens PENDING dela não são retomados: cada execução monta a própria fila a partir do censo do dia. Sem diagnóstico próprio pra run interrompida: a execução que a fecha grava o dela logo em seguida.
+
+**Verificação:** +2 testes de repositório. **Impacto:** `app/storage/repository.py`.
+
+---
+
+## DEC-123 — A limpeza de porta antes do llama-server só mata llama-server; testes nunca tocam a porta real (RESIL-017)
+
+**Contexto (2026-09-08, 12:00, incidente real causado pela própria sessão de desenvolvimento):** com a auditoria do dia em curso, a suíte de integração rodou dois testes de `LocalLLM.start()` na porta padrão (8811) com um executável falso; `_kill_orphan_on_port` achou o llama-server REAL escutando ali e executou `taskkill`. A Fase 2 disparou o disjuntor de saúde após três conexões recusadas e 40 pacientes ficaram sem análise de IA no dia (resgatados pelo DEC-124 na execução seguinte).
+
+**Decisões:**
+1. **Testes isolados por construção:** porta reservada (`_UNUSED_PORT = 1`) e `_kill_orphan_on_port` substituído por no-op nos testes que chamam `start()`. Nenhum teste pode tocar um servidor vivo de novo.
+2. **Defesa no app:** antes do `taskkill`, `tasklist /FI "PID eq <pid>"` diz o nome do executável dono da porta; só mata se for llama-server. Outro programa na porta é logado e deixado em paz (o start falha adiante, de forma visível). Sem resposta do `tasklist`, mantém o comportamento original (DEC-088) pra não regredir o órfão real.
+3. **Regra de método:** NUNCA rodar suíte de testes com auditoria real em andamento nesta máquina sem isolar portas/processos -- registrado na memória do agente.
+
+**Verificação:** +3 testes unitários com netstat/tasklist falsos. **Impacto:** `app/analysis/llm.py`, `tests/integration/test_llm.py`, `tests/unit/test_llm_orphan_port.py`.
+
+---
+
+## DEC-124 — Resgate de IA também pra quem tem evolução gravada depois da última análise (RESIL-018)
+
+**Contexto (2026-09-08):** o resgate de backlog (LLM-004/DEC-090) só recolocava na fila quem NUNCA tinha sido analisado. Quando a Fase 2 caiu com 40 pacientes na fila, quase todos já tinham `patient_state` de dias anteriores: ficariam com análise velha até surgir uma evolução genuinamente nova -- dias, ou nunca, pra paciente que para de ser evoluído. Mesma classe do achado do Codex ("uma falha transitória de saúde derruba o paciente").
+
+**Decisões:** `get_active_patients_pending_ai_analysis` passa a devolver também paciente ativo com `MAX(notes.created_at) > patient_state.last_analysis_at` (os dois carimbos vêm de `_now()`, UTC, comparáveis como texto). O paciente entra pelo caminho de backlog já existente (histórico completo extraído, janela `LLM_LOOKBACK_DAYS`, ordenado do menor pro maior). Quem foi analisado na mesma execução não reentra (`last_analysis_at` posterior às notas).
+
+**Verificação:** +1 teste de repositório (4 casos) +1 E2E (evolução nova perde uma Fase 2 que falha; execução seguinte, sem nada novo no GSUS, reanalisa). **Impacto:** `app/storage/repository.py`.
+
+---
+
+## DEC-125 — Pedidos de tela do pagador: censo por unidade em destaque e ampliável, cor nos dias, "Aguardando análise de IA", mediana explicada (UI-008)
+
+**Contexto (docx "DUVIDAS SOBRE PRODUTO", 2026-09-07):** itens 7-9 e 21-26 -- "censo por unidade: muito importante", "colocar a respectiva cor em cada número" de dia verde/vermelho, traços no painel sem explicação, "tempo mediano de resolução sem dados: está indeterminado? senão vamos remover".
+
+**Decisões:**
+1. **Censo por unidade em destaque.** Relatório: tabela com moldura laranja ANTES dos demais indicadores, com linha de total. Dashboard: cartão destacado com tabelinha (até 3 unidades + total visíveis, sem roubar altura da tabela de pacientes) e botão "Ampliar" que abre a tabela inteira numa `Toplevel` própria (reaproveitada enquanto aberta; ícone herdado do `iconbitmap(default=...)`, DEC-115).
+2. **Cor nos números de dia** (vermelho/verde) no relatório (`.stat.dia-vermelho/.dia-verde`) e no cartão principal da dashboard (só o valor de "Dia vermelho hoje" -- "Dia verde" já era verde na faixa secundária).
+3. **"Aguardando análise de IA"** no lugar do traço/"sem contextualização" quando NÃO existe `patient_state` (`PatientCensusRow.analyzed`); paciente já analisado mantém o traço só onde de fato não há valor.
+4. **Mediana sem dado diz "sem histórico ainda"** (não "tempo indeterminado"/traço) e o relatório traz a definição embaixo do número: horas entre o registro da pendência pela auditoria e sua resolução nas evoluções. Não foi removida nem renomeada: o pagador só precisava entender o que era.
+
+**Verificação:** +1 teste de relatório, +2 de dashboard (Tk). **Impacto:** `app/reports/{html_report,dashboard_metrics}.py`, `app/ui/main_window.py`.
+
+---
+
+## DEC-126 — Previsão de alta relativa vale como EDD documentada, ancorada na data da evolução e rotulada como inferida (EDD-001)
+
+**Contexto (docx do pagador, itens 4-6 e 22):** "100% sem EDD documentada: por quê?"; "Enf MED/CIR geralmente consta 'previsão de alta' nas evoluções, no cabeçalho"; "GO gestantes geralmente alta em 48h". O contrato do LLM só aceita data explícita, nunca estimada pelo modelo (RF-27), então "alta em 48h" virava NAO_REGISTRADA -- 199/200 análises. A regra clínica de contar a previsão relativa é decisão do pagador, expressa nesses itens; a conversão em data é problema de software.
+
+**Decisões:**
+1. **Conversão DETERMINÍSTICA, nunca pelo modelo.** `app/analysis/edd.py`: prazos numéricos em horas/dias ("48h", "2 dias", faixa "24-48h" -> limite superior), "amanhã"/"hoje", e data explícita dd/mm junto de "previsão de alta" (sem ano e já passada -> ano seguinte), sempre a partir da data/hora da própria evolução. "Sem previsão de alta" e alta de SETOR ("alta da UTI em 24h") não contam. Evolução mais recente com previsão vence.
+2. **Só quando o modelo não deu data.** `_run_llm_analysis`: `edd_data` explícito do LLM tem precedência; inferência entra apenas com `edd_data` nulo e grava `edd_status=REGISTRADA` + `edd_inferida=1` (coluna nova em `patient_state`, schema + migração), que segue a MESMA regra pegajosa da data (DEC-064).
+3. **Origem sempre visível.** Relatório individual: "(a partir de previsão relativa na evolução)"; célula EDD da dashboard: "(relativa)". `is_edd_overdue` e o indicador "% sem EDD" passam a enxergar essas datas -- o número do pagador deve cair de 100% na próxima execução com IA.
+4. **Prompt do LLM inalterado.** Pedir ao modelo de 8B pra fazer aritmética de datas seria trocar um problema determinístico por um probabilístico.
+
+**Verificação:** +23 casos de parser, +2 orchestrator, +1 repositório, +1 relatório. **Impacto:** `app/analysis/edd.py` (novo), `app/orchestrator.py`, `app/storage/{repository,database}.py`, `app/reports/{html_report,dashboard_metrics}.py`, `app/ui/main_window.py`. Instalador 1.5.0.

@@ -1331,3 +1331,25 @@ Proxima task: design/UX da tela (pedido explicito anterior do usuario) apos a en
 **Execução 5 (22:46), com a relistagem imediata:** "Dias capturados: 0 de 0" em TODO paciente -- relistar no instante seguinte ao clique devolve a listagem SEM os dias do card (o GSUS reconstrói o conteúdo por AJAX), e "0 dias no card" vira `GSUSNoCurrentAdmissionDays` ("sem internação atual", categoria de NÃO-falha) -- 12 pacientes marcados assim por engano antes de eu parar. Correção: `_relist_days_of_card` espera (teto de 8 s) a listagem voltar a conter dias do card; se não voltar, mantém a lista anterior e avisa -- nunca uma lista vazia. +1 teste (listagem sem os dias do card nas 3 primeiras consultas). Suíte não visual: 362.
 
 **Execução 6 (após reinstalação, SHA-256 `0923FD1257D7D58DF7BB98457FBD44F735B7115BF6F7B0C760FBE9D5F82EF9AD`):** VALIDADA pelo dado gravado. 15 pacientes em 5 min: 12 concluídos com 156 evoluções datadas de 07/09 (contra 0 na execução 4), 0 avisos 'segue oculto', 0 'Dias capturados: 0 de 0', 0 evoluções de episódio antigo, 0 pendências novas com data antiga/DD-MM. 2 erros 'Connection closed' às 22:59:53, quando o processo foi encerrado junto com a sessão do agente que o lançou (sem evento de suspensão) -- lição: lançar a auditoria pelo Agendador do Windows (schtasks /Run), desacoplada da sessão. A tarefa agendada de 08/09 00:01 não rodou (máquina em suspensão, RESIL-003). Instalador final desta sequência: SHA-256 0923FD12...F9AD.
+
+---
+
+## 2026-09-08 — Pendências resolvidas uma a uma: admissão recente benigna, runs abandonadas, porta do llama-server, resgate de IA, pedidos de tela do pagador, EDD relativa; instalador 1.5.0 (DEC-121 a DEC-126)
+
+**Pedido do usuário:** "vamos resolver as pendências uma a uma". Lista de partida: RESIL-015, EDD-001, UI-008, runs RUNNING presas, push, merge. Cada item virou um commit próprio, com testes; docs e versão num commit final.
+
+**Auditoria de validação do 1.4.0 final (11:43, run `5de8302a`, headless, desacoplada via `cmd /c start`):** primeira execução saudável de ponta a ponta com o critério de card por cabeçalho e a relistagem -- aos 15 pacientes, 66 evoluções gravadas, 23 delas datadas de HOJE e 40 de ontem (a classe "dia de hoje pulado" do DEC-120 está fechada de verdade), zero avisos de dia oculto, zero evoluções de episódio antigo. As duas únicas falhas da Fase 1 até o paciente 94 foram "marcador não apareceu" em admissões de 08/09 -- exatamente o caso do RESIL-015.
+
+**Incidente causado pela própria sessão (12:00):** ao rodar a suíte de integração com a auditoria em curso, dois testes de `LocalLLM.start()` na porta padrão fizeram `_kill_orphan_on_port` derrubar o llama-server REAL; a Fase 2 disparou o disjuntor de saúde (3 conexões recusadas) e 40 pacientes ficaram sem análise de IA nesta execução. A Fase 1 seguiu normal. Correção em dois níveis (DEC-123) e resgate na execução seguinte (DEC-124). Lição registrada: nunca rodar testes nesta máquina com auditoria em curso sem isolar porta/processo.
+
+**Feito (6 commits):**
+1. RESIL-015 / DEC-121 -- `GSUSCurrentAdmissionNotFound` + `GSUSNoNotesToExtract`; admissão de hoje/ontem -> `AWAITING_NOTES` (contado à parte, bloco neutro "Admitidos há pouco, ainda sem evolução acessível" com a data de admissão, citado no diagnóstico e na linha de status); coluna `patients_awaiting_notes`.
+2. RESIL-016 / DEC-122 -- runs RUNNING de processos mortos viram INTERRUPTED no início da execução seguinte (9 no banco real serão fechadas pela próxima auditoria).
+3. RESIL-017 / DEC-123 -- porta: testes isolados + `tasklist` antes do `taskkill`.
+4. RESIL-018 / DEC-124 -- resgate de IA por `notes.created_at > last_analysis_at`.
+5. UI-008 / DEC-125 -- censo por unidade em destaque (relatório) e cartão + "Ampliar" (dashboard); cor nos dias; "Aguardando análise de IA"; mediana "sem histórico ainda" com definição.
+6. EDD-001 / DEC-126 -- `app/analysis/edd.py`, `edd_inferida`, rótulo de origem no relatório e na dashboard.
+
+**Testes:** suíte não visual, E2E e integração (esta última com `PLAYWRIGHT_BROWSERS_PATH` apontando pro Firefox do app instalado) e UI por arquivo -- resultados no commit de release. Flake conhecida do Tk (um teste aleatório por arquivo quando vários `tk.Tk()` rodam no mesmo processo) tratada com reexecução individual.
+
+**Fora do alcance do agente (continuam com o usuário):** `git push` (bloqueado pelo classificador) e o merge em `main`, que exige antes descartar a cópia idêntica não commitada das mudanças do Codex no checkout principal (14 arquivos modificados + `app/ui/icons.py`, `assets/`, `scripts/`, `setup/` sem rastreio).

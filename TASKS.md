@@ -616,13 +616,26 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  guarda `admissão - 7 dias` no orchestrator; migração remove 77 pendências de regra
                  com evidência anterior à internação. PENDENTE: confirmar no log da próxima auditoria
                  real qual critério de card foi usado.
-[ ] EDD-001      Previsão de alta RELATIVA ("alta em 48h", "previsão de alta amanhã") ancorada na
-                 data da evolução -- hoje só data explícita conta (199/200 análises sem EDD, embora
-                 "previsão de alta" apareça em 144 evoluções). Mudança de regra clínica: precisa da
-                 validação do pagador antes de implementar.
-[ ] UI-008       Pedidos do pagador (2026-09-07): censo por unidade em destaque com ampliação; cor nos
-                 números de dia verde/vermelho no relatório; painel dizer "aguardando análise de IA"
-                 em vez de traço; renomear "tempo mediano de resolução".
+[x] EDD-001      Previsão de alta RELATIVA ("alta em 48h", "alta amanhã", "previsão de alta 12/09")
+                 convertida de forma determinística a partir da data da evolução (2026-09-08,
+                 DEC-126): `app/analysis/edd.py`, só quando o LLM não deu data; gravada como
+                 `edd_inferida` e rotulada no relatório/dashboard. Regra clínica assumida a partir
+                 dos itens 5, 6 e 22 do docx do pagador. PENDENTE: conferir no relatório real se o
+                 "% sem EDD" cai e se as datas inferidas fazem sentido clínico.
+[x] UI-008       Pedidos do pagador (2026-09-07) atendidos em 2026-09-08 (DEC-125): censo por unidade em
+                 destaque (relatório) e cartão com tabelinha + "Ampliar" (dashboard); cor nos números
+                 de dia verde/vermelho; "Aguardando análise de IA" no lugar do traço; mediana sem dado
+                 diz "sem histórico ainda" com a definição no relatório (mantido o nome).
+[x] RESIL-015    Admissão de hoje/ontem sem card ou sem evolução acessível vira `AWAITING_NOTES`
+                 (categoria benigna, bloco neutro no relatório) em vez de ERROR (2026-09-08,
+                 DEC-121); fora da folga de 1 dia continua erro visível.
+[x] RESIL-016    Runs abandonadas por processo morto (9 no banco real) fechadas como INTERRUPTED
+                 pela execução seguinte (2026-09-08, DEC-122).
+[x] RESIL-017    `_kill_orphan_on_port` matou o llama-server de uma auditoria real quando a suíte de
+                 integração rodou `start()` na porta padrão (2026-09-08, DEC-123): testes isolados da
+                 porta real + só mata processo que É llama-server.
+[x] RESIL-018    Resgate de IA também pra paciente com evolução gravada depois da última análise
+                 (2026-09-08, DEC-124) -- antes só quem nunca fora analisado voltava à fila.
 [x] RESIL-014    Acordeão exclusivo fecha o card da internação atual após `_expand_all` (achado real
                  2026-09-07, DEC-120): `_ensure_episode_expanded` reabre só o card identificado.
                  Clique de menu por texto usa o primeiro elemento VISÍVEL (item duplicado no GSUS
