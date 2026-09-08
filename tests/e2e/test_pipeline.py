@@ -1079,3 +1079,32 @@ def test_pipeline_old_admission_without_card_stays_a_visible_failure(tmp_path):
     assert "Prontuários não processados (2)" in content
     assert "Admitidos há pouco" not in content
     conn.close()
+
+
+def test_pipeline_reanalyzes_patient_whose_new_notes_missed_an_interrupted_phase_2(tmp_path):
+    """RESIL-018: paciente COM análise antiga ganha evolução nova numa execução
+    cuja Fase 2 falha -- na execução seguinte (sem nada novo no GSUS) ele
+    entra na fila da IA pelo backlog, em vez de ficar com análise velha até
+    surgir outra evolução."""
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    patients = [Patient(record_number="100", bed="2A", unit=UNIT)]
+    census = FixtureCensusSource(patients)
+    report_path = tmp_path / "relatorio.html"
+
+    # 1ª execução: IA funciona -> patient_state gravado.
+    run_once(repo, census, FixtureRecordSource({"100": "awaiting_consult.txt"}), UNIT, report_path, llm=StubLLM())
+    first_state = repo.get_patient_state("100")
+    assert first_state is not None
+
+    # 2ª execução: evoluções novas chegam, mas a IA falha -> estado NÃO muda.
+    run_once(repo, census, FixtureRecordSource({"100": "resolved_consult.txt"}), UNIT, report_path, llm=AlwaysFailingLLM())
+    assert repo.get_patient_state("100")["last_analysis_at"] == first_state["last_analysis_at"]
+
+    # 3ª execução: nada novo no GSUS -- só o backlog pode trazê-lo de volta.
+    llm = OrderRecordingLLM()
+    run_once(repo, census, FixtureRecordSource({"100": "resolved_consult.txt"}), UNIT, report_path, llm=llm)
+
+    assert len(llm.call_sizes) == 1
+    assert repo.get_patient_state("100")["last_analysis_at"] > first_state["last_analysis_at"]
+    conn.close()

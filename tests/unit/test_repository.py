@@ -519,3 +519,28 @@ def test_resume_leaves_finished_runs_alone(repo):
 
     row = repo.conn.execute("SELECT status, finished_at FROM runs WHERE run_id = ?", (run_id,)).fetchone()
     assert (row["status"], row["finished_at"]) == ("COMPLETED", finished_at)
+
+
+def test_pending_ai_analysis_includes_patient_with_notes_stored_after_last_analysis(repo):
+    """RESIL-018 (achado real 2026-09-08): a Fase 2 caiu com 40 pacientes na
+    fila, quase todos JÁ com análise de dias anteriores -- o resgate antigo
+    (só quem nunca foi analisado) não os recolocava. Agora: evolução gravada
+    depois de `last_analysis_at` também conta."""
+    stale = repo.upsert_patient(_sample_patient("111"))
+    fresh = repo.upsert_patient(_sample_patient("222"))
+    never = repo.upsert_patient(_sample_patient("333"))
+    no_notes = repo.upsert_patient(_sample_patient("444"))
+    for pid in (stale, fresh, never):
+        repo.add_note(Note(
+            patient_id=pid, source_type="EVOLUCAO", specialty="MED", timestamp="2026-09-08T10:00:00",
+            text=f"evolução {pid}", text_hash=f"h-{pid}",
+        ))
+    repo.save_patient_state(stale, "ctx", "status")
+    repo.save_patient_state(fresh, "ctx", "status")
+    repo.save_patient_state(no_notes, "ctx", "status")
+    # análise ANTES da evolução gravada (stale) x DEPOIS (fresh)
+    repo.conn.execute("UPDATE patient_state SET last_analysis_at = '2026-09-01T00:00:00+00:00' WHERE patient_id = ?", (stale,))
+    repo.conn.execute("UPDATE patient_state SET last_analysis_at = '2099-01-01T00:00:00+00:00' WHERE patient_id = ?", (fresh,))
+    repo.conn.commit()
+
+    assert sorted(repo.get_active_patients_pending_ai_analysis()) == sorted([stale, never])

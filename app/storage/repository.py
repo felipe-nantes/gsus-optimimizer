@@ -265,14 +265,26 @@ class Repository:
         pode levar dias ou nunca acontecer. `run_once` usa isto para
         recolocar esses pacientes na fila de IA em TODA execução, além dos
         que já entram por nota nova (RULES-001 continua vendo o histórico
-        completo de qualquer forma -- isto só afeta a fila da IA)."""
+        completo de qualquer forma -- isto só afeta a fila da IA).
+
+        RESIL-018 (achado real 2026-09-08): a Fase 2 foi interrompida pelo
+        disjuntor de saúde com 40 pacientes na fila -- a maioria JÁ tinha
+        `patient_state` de dias anteriores, então o critério antigo (só quem
+        nunca foi analisado) não os resgatava: ficavam com análise velha até
+        surgir uma evolução genuinamente nova. Agora também entra quem tem
+        evolução GRAVADA (`notes.created_at`) depois da última análise
+        (`patient_state.last_analysis_at`) -- os dois carimbos vêm de
+        `_now()` (UTC), comparáveis como texto."""
         rows = self.conn.execute(
             """
-            SELECT DISTINCT p.patient_id
+            SELECT p.patient_id
             FROM patients p
             JOIN notes n ON n.patient_id = p.patient_id
+            LEFT JOIN patient_state s ON s.patient_id = p.patient_id
             WHERE p.active = 1
-              AND p.patient_id NOT IN (SELECT patient_id FROM patient_state)
+            GROUP BY p.patient_id
+            HAVING MAX(s.patient_id) IS NULL
+                OR MAX(n.created_at) > MAX(COALESCE(s.last_analysis_at, ''))
             """
         ).fetchall()
         return [row["patient_id"] for row in rows]
