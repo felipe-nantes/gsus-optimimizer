@@ -74,6 +74,23 @@ DEFAULT_STARTUP_TIMEOUT_SECONDS = 300
 DEFAULT_CTX_SIZE = 8192
 
 
+def _image_name_of_pid(pid: str) -> str:
+    """Nome do executável do processo `pid` via `tasklist` (nativo do
+    Windows), em minúsculas; vazio se não der pra descobrir. Best-effort,
+    nunca levanta."""
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in result.stdout.splitlines():
+        if line.startswith('"'):
+            return line.split('","')[0].strip('"').lower()
+    return ""
+
+
 def _kill_orphan_on_port(port: int) -> None:
     """Achado real (auditoria de resiliência 2026-08-28): se uma execução
     anterior deixou um `llama-server` órfão vivo (ver `stop()`), a próxima
@@ -96,6 +113,18 @@ def _kill_orphan_on_port(port: int) -> None:
             continue
         pid = parts[4]
         if pid == "0":
+            continue
+        # RESIL-017 (achado real 2026-09-08): esta limpeza matou o llama-server
+        # de uma auditoria EM CURSO quando um teste de integração chamou
+        # `start()` na porta padrão a partir de outro processo. A porta ocupada
+        # só é 'órfão' se o dono for um llama-server; qualquer outro programa
+        # na porta fica em paz (e o start falha adiante, de forma visível).
+        image = _image_name_of_pid(pid)
+        if image and "llama" not in image:
+            logger.warning(
+                "Porta %d ocupada pelo processo %s (pid %s), que não é llama-server -- não encerrado.",
+                port, image, pid,
+            )
             continue
         logger.warning(
             "Porta %d já ocupada (pid %s) antes de iniciar llama-server -- "

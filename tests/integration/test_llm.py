@@ -196,6 +196,19 @@ def test_analyze_patient_normalizes_null_string_edd_status(stub_server):
 
 # -------------------------------------------------------- LocalLLM.start()
 
+# RESIL-017 (achado real 2026-09-08): estes testes chamavam `start()` na porta
+# PADRÃO (8811) e `_kill_orphan_on_port` encerrou o llama-server de uma
+# auditoria real em curso na mesma máquina. Nenhum teste pode tocar a porta
+# real nem a limpeza de porta.
+_UNUSED_PORT = 1  # porta reservada, nunca ocupada por um llama-server real
+
+
+def _isolate_from_real_llama_server(monkeypatch):
+    from app.analysis import llm as llm_module
+
+    monkeypatch.setattr(llm_module, "_kill_orphan_on_port", lambda port: None)
+
+
 def test_start_raises_llm_startup_error_when_server_path_missing(tmp_path):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"")
@@ -228,14 +241,15 @@ def test_start_wraps_popen_oserror_as_llm_startup_error(tmp_path, monkeypatch):
         raise FileNotFoundError("[WinError 2] simulado")
 
     monkeypatch.setattr(subprocess, "Popen", _raise_oserror)
+    _isolate_from_real_llama_server(monkeypatch)
 
-    llm = LocalLLM(model_path=model, server_path=server)
+    llm = LocalLLM(model_path=model, server_path=server, port=_UNUSED_PORT)
     with pytest.raises(LLMStartupError):
         llm.start()
     assert llm._process is None
 
 
-def test_start_wraps_log_file_oserror_as_llm_startup_error(tmp_path):
+def test_start_wraps_log_file_oserror_as_llm_startup_error(tmp_path, monkeypatch):
     """Achado de auditoria (RESIL-011/DEC-105, 2026-09-01): abrir o arquivo
     de log do llama-server (disco cheio, permissão negada) ficava FORA de
     qualquer try/except -- diferente do Popen logo abaixo (já protegido,
@@ -255,7 +269,8 @@ def test_start_wraps_log_file_oserror_as_llm_startup_error(tmp_path):
     blocker.write_bytes(b"")
     log_path = blocker / "sub" / "llama-server.log"
 
-    llm = LocalLLM(model_path=model, server_path=server, server_log_path=log_path)
+    _isolate_from_real_llama_server(monkeypatch)
+    llm = LocalLLM(model_path=model, server_path=server, server_log_path=log_path, port=_UNUSED_PORT)
     with pytest.raises(LLMStartupError):
         llm.start()
     assert llm._process is None
