@@ -101,6 +101,21 @@ def _dih(admission_date: str | None) -> int | None:
     return days_since_admission(admission_date)
 
 
+def _format_datetime_br(value: str | None) -> str:
+    """ISO `AAAA-MM-DDTHH:MM:SS` -> "DD/MM/AAAA HH:MM" (pedido do pagador,
+    DEC-119). Data sem hora (meia-noite exata vinda de "DD/MM/AAAA") sai só
+    como "DD/MM/AAAA". Valor não reconhecido volta como está -- nunca some."""
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if parsed.hour == 0 and parsed.minute == 0 and parsed.second == 0:
+        return parsed.strftime("%d/%m/%Y")
+    return parsed.strftime("%d/%m/%Y %H:%M")
+
+
 def _format_hours(hours: float | None) -> str:
     if hours is None:
         return "tempo indeterminado"
@@ -596,12 +611,12 @@ def _render_pending(item: dict) -> str:
     date_suffix = f" ({html.escape(_format_hours(item['_hours_elapsed']))})" if evidence_date else ""
     first_evidence_html = (
         f'<div class="evidence">{html.escape(first_label)}'
-        f'{f": {html.escape(evidence_date)}" if evidence_date else ""} — '
+        f'{f": {html.escape(_format_datetime_br(evidence_date))}" if evidence_date else ""} — '
         f'&ldquo;{html.escape(item["evidence"])}&rdquo;{date_suffix}</div>'
     )
     extra_evidence_html = "".join(
         f'<div class="evidence">Evidência {i + 2}'
-        f'{f": {html.escape(row["timestamp"])}" if row["timestamp"] else ""} — '
+        f'{f": {html.escape(_format_datetime_br(row["timestamp"]))}" if row["timestamp"] else ""} — '
         f'&ldquo;{html.escape(row["text"])}&rdquo;</div>'
         for i, row in enumerate(extra_evidence)
     )

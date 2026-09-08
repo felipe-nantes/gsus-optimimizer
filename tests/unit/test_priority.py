@@ -164,3 +164,15 @@ def test_days_since_admission_unparseable_date_returns_none():
 def test_days_since_admission_never_negative():
     """Admissão "no futuro" (relógio dessincronizado) nunca vira DIH negativo."""
     assert days_since_admission("2026-08-30", today=date(2026, 8, 25)) == 0
+
+
+# ------------------------------------------------------------- DEC-119
+
+def test_pre_admission_cutoff_uses_census_format_and_grace():
+    from app.analysis.priority import PRE_ADMISSION_GRACE_DAYS, pre_admission_cutoff_iso
+
+    assert PRE_ADMISSION_GRACE_DAYS == 7
+    assert pre_admission_cutoff_iso("19/08/2026") == "2026-08-12"  # formato real do censo (DEC-099)
+    assert pre_admission_cutoff_iso("2026-08-19") == "2026-08-12"
+    assert pre_admission_cutoff_iso(None) is None
+    assert pre_admission_cutoff_iso("data invalida") is None

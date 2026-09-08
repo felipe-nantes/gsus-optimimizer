@@ -108,3 +108,63 @@ def test_collect_days_without_cap_opens_every_day_as_before():
 
     assert total == 2
     assert len(days) == 2
+
+
+# ------------------------------------------------------------- DEC-119
+
+from app.gsus.records import CURRENT_ADMISSION_MARKER  # noqa: E402
+
+
+class _FakeCollectDaysPageWithHeader(_FakeCollectDaysPage):
+    """Além da listagem de dias, responde à pergunta "qual card tem o
+    cabeçalho 'Permanece Internado'?" (arg = marcador) com `current_card_id`."""
+
+    def __init__(self, day_rows, current_card_id):
+        super().__init__(day_rows)
+        self._current_card_id = current_card_id
+
+    def evaluate(self, script, arg=None):
+        if arg == CURRENT_ADMISSION_MARKER:
+            return self._current_card_id
+        return super().evaluate(script, arg)
+
+
+def test_collect_days_keeps_only_the_current_admission_card_even_when_old_episodes_are_open():
+    """Achado real 2026-09-07 (DEC-119): `_expand_all` abre todos os
+    episódios, então "card aberto" deixava passar dias de 2014-2025. Com o
+    cabeçalho localizado, só os dias do card da internação atual entram."""
+    day_rows = [
+        _day_row("14/02/2022", episode="codOLD1", open_=True),
+        _day_row("15/02/2022", episode="codOLD1", open_=True),
+        _day_row("05/09/2026", episode="codCUR9", open_=True),
+        _day_row("06/09/2026", episode="codCUR9", open_=True),
+    ]
+    page = _FakeCollectDaysPageWithHeader(day_rows, current_card_id="historicoAtendimentocodCUR9")
+
+    days, total = _collect_days(page, deadline=float("inf"), skip_days=set(), current_episode_only=True)
+
+    assert total == 2
+    assert sorted(d["date"] for d in days) == ["2026-09-05", "2026-09-06"]
+
+
+def test_collect_days_falls_back_to_open_episode_when_header_not_found():
+    day_rows = [
+        _day_row("14/02/2022", episode="codOLD1", open_=False),
+        _day_row("06/09/2026", episode="codCUR9", open_=True),
+    ]
+    page = _FakeCollectDaysPageWithHeader(day_rows, current_card_id="")
+
+    days, total = _collect_days(page, deadline=float("inf"), skip_days=set(), current_episode_only=True)
+
+    assert total == 1
+    assert [d["date"] for d in days] == ["2026-09-06"]
+
+
+def test_collect_days_ignores_header_answer_that_matches_no_day():
+    day_rows = [_day_row("06/09/2026", episode="codCUR9", open_=True)]
+    page = _FakeCollectDaysPageWithHeader(day_rows, current_card_id="historicoAtendimentocodXYZ")
+
+    days, total = _collect_days(page, deadline=float("inf"), skip_days=set(), current_episode_only=True)
+
+    assert total == 1
+    assert len(days) == 1

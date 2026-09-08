@@ -1281,3 +1281,27 @@ Proxima task: design/UX da tela (pedido explicito anterior do usuario) apos a en
 **Nota sobre o método:** duas tentativas de acionar "Atualizar agora" por clique sintetizado na janela (localizando o botão laranja numa captura) não chegaram ao programa e foram abandonadas -- não há como garantir em qual janela um clique de tela cai. `--auto-update` é o caminho verificável.
 
 **Pendente:** tentar a auditoria mais tarde (ou o usuário conferir o login do GSUS manualmente no Firefox, como no DEC-077); rebuild/reinstall com DEC-118; push.
+
+---
+
+## 2026-09-07 — Três defeitos de dados achados pelas perguntas do pagador: datas da IA, episódios antigos nas regras, formato brasileiro; instalador 1.4.0 (DEC-119)
+
+**Origem:** o pagador enviou 17 perguntas sobre o relatório e o painel ("como é calculado o tempo?", "por que 100% sem EDD?", "data em formato brasileiro" etc.). Ao responder cada uma contra o banco real (183 ativos, 200 análises, 259 pendências), apareceram três defeitos que nenhuma pergunta nomeava diretamente.
+
+**Achados (banco de produção, só padrões, nunca dado de paciente):**
+1. 111 de 204 pendências ativas do LLM tinham `evidence_date` em "DD/MM/AAAA[ HH:MM]" -- o modelo copia o formato da evolução; `hours_elapsed_since` só lê ISO -> "tempo indeterminado" no censo onde havia data (e SLA nunca estourava pra elas).
+2. 109 dos 183 pacientes ativos (todos admitidos em 2026) tinham evoluções de 2014-2025 gravadas, e 77 pendências de REGRA ativas com evidência anterior à internação atual (tempos de "anos" no censo, mediana de resolução contaminada). Causa raiz em `records.py`: `extract_notes` expande TODOS os episódios (`_expand_all`) antes de `_collect_days`, e o filtro `current_episode_only` só olhava "card aberto" -> não distinguia mais a internação atual dos episódios antigos.
+3. O relatório individual imprimia a data da evidência crua (ISO), contra o pedido explícito de formato brasileiro.
+
+**Feito:**
+- `normalizer.normalize_llm_datetime` / `normalize_iso_date` (ISO, "DD/MM/AAAA HH:MM", "DD/MM/AAAA"; nunca inventa). `orchestrator._run_llm_analysis` normaliza `evidence_date` (item novo e reiteração) e `edd_data` ANTES de persistir.
+- `records._collect_days`: identifica o card da internação atual pelo cabeçalho com "Permanece Internado" (`_current_episode_card_id`, só texto de cabeçalho) e fica com os dias dele; "episódio aberto" vira fallback com aviso no log. Critério registrado em cada log "Ignorando N dia(s)...".
+- `orchestrator._process_patient_rules`: segunda linha de defesa -- evolução datada antes de admissão menos `PRE_ADMISSION_GRACE_DAYS = 7` (pronto-socorro) não entra nas regras nem no LLM; continua gravada (não reabrir o dia, DEC-048). `priority.pre_admission_cutoff_iso` compartilhado com a migração.
+- `database._migrate`: correção de DADOS idempotente -- converte `evidence_date`/`timestamp` em DD/MM para ISO e remove pendências de REGRA ativas com evidência anterior à internação atual (item + evidências extras), com contagem no log. Pendências do LLM não são tocadas (se resolvem sozinhas na próxima análise).
+- `html_report._format_datetime_br`: evidências em "DD/MM/AAAA HH:MM" (só data quando meia-noite exata).
+- Versão 1.4.0. Testes: +3 normalizer, +1 priority, +4 orchestrator (normalização, reiteração, null nunca palpite, guarda por admissão com folga, sem data não filtra), +1 migração, +3 `_collect_days` (card atual, fallback, resposta sem correspondência), +1 relatório; 1 teste existente ajustado (admissão em junho, pra nota de julho continuar valendo). Suíte: 358 não visuais + 63 integração/E2E + UI por arquivo -- todos aprovados.
+- Build/instalação: `installer/output/GSUSAuditoria-Setup.exe` 120,0 MB, SHA-256 `89957D419F4CF983FFF123E8EFD50F3EA7492C0586043C960721940A4CA960FC`. Instalado silenciosamente nesta máquina (exit 0), versão 1.4.0 no registro, .exe idêntico ao dist por hash, 1712 arquivos = dist, modelo/Firefox/runtime preservados. Backup do banco real feito antes da migração em backup/auditoria-antes-DEC119-20260907-2103.db. Migração ensaiada numa CÓPIA do banco real: 123 datas convertidas, 38 pendências de regra removidas, 221 ativas restantes das quais 200 com tempo calculável (antes: 72).
+
+**Respostas ao pagador (resumo, entregues em texto):** 6 falhas = card de internação não apareceu / número não aceito, retomadas sozinhas; 100% sem EDD = critério exige DATA explícita e MED/CIR escrevem "previsão de alta em 48h" (o campo do cabeçalho É capturado: 4.440 evoluções) -> proposta de aceitar previsão relativa ancorada na data da evolução, decisão clínica de vocês; mediana = horas entre registrar e sumir, só existe após várias execuções; prioridade = regra fixa (necessidade hospitalar, categoria sempre-alta, SLA 24/48h não validado); "aguentar o laudo da AIH" = erro de escrita do modelo (0 ocorrências nas 20.728 evoluções brutas), AIH = Autorização de Internação Hospitalar; censo por unidade em destaque e cor nos dias = pedidos viáveis, não feitos nesta rodada.
+
+**Pendente:** validação real das correções na próxima auditoria (log deve mostrar "critério: cabeçalho da internação atual" e a migração convertendo/removendo); aceitar previsão de alta relativa (regra clínica); censo por unidade ampliável; cores nos números de dia verde/vermelho no relatório.

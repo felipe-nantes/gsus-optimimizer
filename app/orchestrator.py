@@ -21,11 +21,16 @@ from typing import Callable, Protocol
 
 from app.analysis import run_diagnosis
 from app.analysis.llm import LLMAnalysisError
-from app.analysis.priority import compute_priority, hours_elapsed_since
+from app.analysis.priority import compute_priority, hours_elapsed_since, pre_admission_cutoff_iso
 from app.analysis.rules import StructuredNote, apply_all_rules, most_recent_note
 from app.analysis.taxonomy import CATEGORY_INTERCONSULTA, CATEGORY_PROCEDIMENTO_CIRURGIA, default_origin
 from app.extraction.hashing import compute_note_hash
-from app.extraction.normalizer import normalize_datetime, normalize_text
+from app.extraction.normalizer import (
+    normalize_datetime,
+    normalize_iso_date,
+    normalize_llm_datetime,
+    normalize_text,
+)
 from app.extraction.parser import parse_note_blocks
 from app.gsus.census import GSUSCensusIncompleteError
 from app.gsus.records import GSUSNoCurrentAdmissionDays, GSUSSearchUnresponsiveError
@@ -727,6 +732,17 @@ def _process_patient_rules(
     all_structured_notes: list[StructuredNote] = []
     new_structured_notes: list[StructuredNote] = []
 
+    # DEC-119 (achado real 2026-09-07): 109 dos 183 pacientes ativos tinham
+    # evoluções de 2014-2025 gravadas, e 77 pendências de REGRA ativas com
+    # evidência anterior à internação atual (tempos de "anos" no censo). A
+    # extração deixava passar dias de episódios antigos. Segunda linha de
+    # defesa, independente da tela do GSUS: evolução datada antes da
+    # admissão (menos uma folga pro pronto-socorro) NÃO entra nas regras nem
+    # no LLM. Continua sendo gravada -- é o que evita reabrir o dia na próxima
+    # execução (DEC-048) -- só não é analisada.
+    cutoff_iso = pre_admission_cutoff_iso(patient.admission_date)
+    ignored_before_admission = 0
+
     for block in blocks:
         normalized_text = normalize_text(block["text"])
         timestamp = normalize_datetime(block["timestamp_raw"])
@@ -735,7 +751,11 @@ def _process_patient_rules(
         structured = StructuredNote(
             timestamp=timestamp, specialty=block["specialty"], source_type=block["source_type"], text=normalized_text
         )
-        all_structured_notes.append(structured)
+        belongs_to_current_admission = not (cutoff_iso and timestamp and timestamp[:10] < cutoff_iso)
+        if belongs_to_current_admission:
+            all_structured_notes.append(structured)
+        else:
+            ignored_before_admission += 1
 
         note = Note(
             patient_id=patient_id,
@@ -745,8 +765,14 @@ def _process_patient_rules(
             text=normalized_text,
             text_hash=note_hash,
         )
-        if repo.add_note(note):  # True = NEW_NOTE, False = SKIP (já visto)
+        if repo.add_note(note) and belongs_to_current_admission:  # True = NEW_NOTE, False = SKIP (já visto)
             new_structured_notes.append(structured)
+
+    if ignored_before_admission:
+        logger.info(
+            "Ignorando %d evolução(ões) anterior(es) à internação atual (antes de %s) do paciente %s",
+            ignored_before_admission, cutoff_iso, pseudonym.for_log(patient_id),
+        )
 
     previous_state_row = repo.get_patient_state(patient_id)
     previous_necessidade = previous_state_row["necessidade_hospitalar"] if previous_state_row else None
@@ -992,7 +1018,9 @@ def _run_llm_analysis(
         necessidade_hospitalar_justificativa=analysis["necessidade_hospitalar_justificativa"],
         objetivo_terapeutico=analysis["objetivo_terapeutico"],
         proximo_passo=analysis["proximo_passo"],
-        edd_data=analysis.get("edd_data"),
+        # DEC-119: o contrato pede "AAAA-MM-DD", mas o modelo às vezes copia
+        # "DD/MM/AAAA" da evolução -- `is_edd_overdue` só lê ISO.
+        edd_data=normalize_iso_date(analysis.get("edd_data")),
         edd_status=analysis["edd_status"],
         dia_classificacao=analysis["dia_classificacao"],
         dia_causa=analysis.get("dia_causa"),
@@ -1010,16 +1038,21 @@ def _run_llm_analysis(
     # que faltava).
     matched_pending_ids = set()
     for item in analysis["pending_items"]:
+        # DEC-119 (achado real): o modelo devolve `evidence_date` no formato
+        # da evolução ("DD/MM/AAAA HH:MM") em mais da metade dos casos --
+        # gravado cru, `hours_elapsed_since` não lia e o censo mostrava
+        # "tempo indeterminado" onde havia data. Normaliza ANTES de persistir.
+        evidence_iso = normalize_llm_datetime(item.get("evidence_date"))
         existing = _find_matching_pending(active_rows, item["category"], item.get("subcategory"))
         if existing is not None:
             matched_pending_ids.add(existing["pending_id"])
-            repo.add_pending_item_evidence(existing["pending_id"], item.get("evidence_date"), item["evidence"])
+            repo.add_pending_item_evidence(existing["pending_id"], evidence_iso, item["evidence"])
             repo.update_pending_item_progress(
                 existing["pending_id"], confidence=item.get("confidence"), flow_status=item.get("flow_status")
             )
             continue
 
-        hours_elapsed = hours_elapsed_since(item.get("evidence_date"))
+        hours_elapsed = hours_elapsed_since(evidence_iso)
         priority = compute_priority(item["category"], analysis["necessidade_hospitalar"], hours_elapsed)
         # Achado real (DEC-064): o LLM frequentemente devolve origin=null
         # (campo opcional no contrato) -- sem fallback, a maioria das
@@ -1028,7 +1061,7 @@ def _run_llm_analysis(
         # caminho do LLM ficava sem default).
         origin = item.get("origin") or default_origin(item["category"])
         repo.add_pending_item(
-            patient_id, item["category"], item["description"], item["evidence"], item.get("evidence_date"),
+            patient_id, item["category"], item["description"], item["evidence"], evidence_iso,
             subcategory=item.get("subcategory"), origin=origin, priority=priority,
             confidence=item.get("confidence"), is_inferred=bool(item.get("is_inferred")),
             flow_status=item.get("flow_status"), source="LLM",

@@ -2222,3 +2222,20 @@ Assimetria de risco deliberada: um falso positivo aqui (tratar um censo genuinam
 **Decisão:** cada etapa (contexto, navegador, playwright) roda em `try/except` próprio, seguindo para a próxima e logando só `type(exc).__name__` (mensagens do Playwright podem carregar HTML de página, DEC-082). O `__exit__` nunca levanta. Testes: exceção original preservada com fechamento falho; fechamento falho sem exceção no corpo também não levanta.
 
 **Impacto:** `app/gsus/client.py`, `tests/unit/test_gsus_client.py`. Sem rebuild nesta decisão.
+
+---
+
+## DEC-119 — Datas da IA normalizadas antes de persistir, internação atual identificada pelo cabeçalho (+ guarda por data de admissão), migração de dados e datas em formato brasileiro
+
+**Contexto (2026-09-07):** as perguntas do pagador sobre "tempo", "EDD" e "formato brasileiro" levaram a conferir o banco real: 111/204 pendências do LLM com data em DD/MM (ilegível pro cálculo de tempo), 77 pendências de regra com evidência de 2022-2025 em pacientes admitidos em 2026 (109/183 pacientes com evoluções de episódios antigos gravadas), e datas cruas ISO no relatório.
+
+**Decisões:**
+1. **Normalizar na fronteira, não no consumo.** `evidence_date`/`edd_data` do LLM viram ISO em `_run_llm_analysis`, antes de `add_pending_item`/`add_pending_item_evidence`/`save_patient_state`. Todo leitor (`hours_elapsed_since`, `is_edd_overdue`, relatório, dashboard) continua assumindo ISO -- um único ponto de conversão. Formato desconhecido vira `None` (RF-23: nunca inventa tempo).
+2. **Card da internação atual pelo cabeçalho, com fallback.** `_collect_days` pergunta ao DOM qual `card_body` tem cabeçalho com "Permanece Internado" (mesmo sinal já provado em `open_current_admission`, DEC-025/026) -- irmão anterior ou primeiro filho do pai; exige EXATAMENTE um card. Sem resposta inequívoca, mantém o critério antigo (episódio aberto) e avisa no log. Nunca lê conteúdo de dia, só cabeçalho. Não validado contra o GSUS real nesta sessão -- o log da próxima auditoria diz qual critério foi usado.
+3. **Guarda por data de admissão no orchestrator, com folga de 7 dias.** Independente da tela: evolução datada antes de `admission_date - 7d` não entra em regras nem no LLM. A folga existe porque o paciente passa dias no pronto-socorro antes da admissão formal e um exame pedido lá é pendência real; o bug eram anos, não dias. Sem data de internação, nada é filtrado. A evolução continua sendo GRAVADA (é o que impede reabrir o dia, DEC-048) -- só não é analisada.
+4. **Migração de DADOS idempotente em `_migrate`.** Converte datas DD/MM já gravadas e remove (não "resolve") pendências de REGRA com evidência anterior à internação atual: nunca foram pendências válidas, pendência de regra não se resolve por ausência (DEC-064) -- ficariam pra sempre --, e marcá-las como resolvidas contaminaria a mediana de resolução. Pendências do LLM ficam: são reavaliadas a cada análise e se resolvem sozinhas.
+5. **Formato brasileiro só na apresentação.** `_format_datetime_br` no relatório; o banco segue ISO (ordenação e comparação por texto dependem disso).
+
+**Verificação:** +13 testes; suíte inteira aprovada (358 unitários não visuais, 63 integração/E2E, UI por arquivo). Instalador 120,0 MB, SHA-256 `89957D419F4CF983FFF123E8EFD50F3EA7492C0586043C960721940A4CA960FC`. A migração e o novo critério de card só se provam na próxima auditoria real -- registrado como pendente no CURRENT_STATE.
+
+**Impacto:** `app/extraction/normalizer.py`, `app/analysis/priority.py` (`PRE_ADMISSION_GRACE_DAYS`, `pre_admission_cutoff_iso`), `app/orchestrator.py`, `app/gsus/records.py`, `app/storage/database.py`, `app/reports/html_report.py`, `installer/gsus-auditoria.iss` (1.4.0), testes. Sem mudança de schema.

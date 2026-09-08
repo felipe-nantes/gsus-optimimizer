@@ -433,8 +433,9 @@ def test_limit_to_recent_window_no_op_when_no_note_has_timestamp():
 def test_process_patient_limits_llm_input_but_not_rules(repo):
     """A janela de 2 semanas só limita o que vai pro LLM -- RULES-001
     continua vendo o histórico completo (não tem o custo de contexto/tempo
-    do LLM)."""
-    patient = _patient()
+    do LLM). Admissão em junho (DEC-119): a nota de julho pertence a ESTA
+    internação -- o filtro por data de admissão não pode descartá-la."""
+    patient = Patient(record_number="123456", bed="2A", unit="U", admission_date="2026-06-15")
     patient_id = repo.upsert_patient(patient)
     old_exam_note = (
         "01/07/2026 08:00 - Profissional Teste Um (Medico clinico)\n"
@@ -574,3 +575,81 @@ def test_prepare_notes_for_llm_reports_limited_when_only_size_cuts_something():
 
     assert result == [notes[1]]  # janela de data manteve as duas, corte por tamanho descartou a mais antiga
     assert window_limited is True
+
+
+# ------------------------------------------------------------- DEC-119
+
+def test_llm_dates_in_br_format_are_normalized_before_saving(repo):
+    """Achado real 2026-09-07: 111 de 204 pendências ativas do LLM tinham
+    evidence_date em DD/MM (copiado da evolução) -- `hours_elapsed_since`
+    não lê e o censo mostrava "tempo indeterminado" onde havia data."""
+    patient_id = repo.upsert_patient(_patient())
+    llm = StubLLMSequence([
+        _base_analysis(
+            edd_data="25/08/2026", edd_status="REGISTRADA",
+            pending_items=[_pending_item(evidence_date="20/08/2026 08:00")],
+        ),
+        _base_analysis(pending_items=[_pending_item(evidence_date="21/08/2026 09:15")]),
+    ])
+
+    _run_llm_analysis(repo, patient_id, llm, [_note()])
+    active = repo.get_active_pending_items(patient_id)
+    assert len(active) == 1
+    assert active[0]["evidence_date"] == "2026-08-20T08:00:00"
+    assert repo.get_patient_state(patient_id)["edd_data"] == "2026-08-25"
+
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T09:15:00")])
+    extra = repo.get_pending_item_evidence(active[0]["pending_id"])
+    assert [row["timestamp"] for row in extra] == ["2026-08-21T09:15:00"]
+
+
+def test_llm_unrecognized_evidence_date_becomes_null_never_a_guess(repo):
+    patient_id = repo.upsert_patient(_patient())
+    llm = StubLLMSequence([_base_analysis(pending_items=[_pending_item(evidence_date="semana passada")])])
+
+    _run_llm_analysis(repo, patient_id, llm, [_note()])
+
+    assert repo.get_active_pending_items(patient_id)[0]["evidence_date"] is None
+
+
+def test_process_patient_ignores_notes_dated_before_current_admission(repo):
+    """Achado real 2026-09-07: dias de episódios antigos (2014-2025)
+    entravam nas regras e geravam pendências com "anos" de espera. Nota
+    anterior à admissão menos a folga de pronto-socorro não entra nas
+    regras nem no LLM -- mas continua gravada (não reabrir o dia, DEC-048)."""
+    patient = Patient(record_number="123456", bed="2A", unit="U", admission_date="19/08/2026")
+    patient_id = repo.upsert_patient(patient)
+    old_episode_note = (
+        "01/07/2026 08:00 - Profissional Teste Um (Medico clinico)\n"
+        "Solicitada tomografia de abdome.\n\n"
+    )
+    emergency_note = (  # 4 dias antes da admissão: dentro da folga, vale
+        "15/08/2026 08:00 - Profissional Teste Um (Medico clinico)\n"
+        "Solicitada tomografia de torax.\n\n"
+    )
+    recent_note = (
+        "20/08/2026 08:00 - Profissional Teste Um (Medico clinico)\n"
+        "Paciente estavel, sem queixas novas.\n\n"
+    )
+    record_source = FixedTextRecordSource(old_episode_note + emergency_note + recent_note)
+
+    result = _process_patient_rules(repo, patient, patient_id, record_source)
+
+    active = repo.get_active_pending_items(patient_id)
+    assert len(active) == 1  # só a tomografia de tórax (pronto-socorro), nunca a de 01/07
+    assert active[0]["evidence_date"] == "2026-08-15T08:00:00"
+    assert "2026-07-01" in repo.get_note_days(patient_id)  # gravada, não analisada
+    assert result is not None
+    llm_notes, _ = result
+    assert all(note.timestamp >= "2026-08-12" for note in llm_notes)
+
+
+def test_process_patient_without_admission_date_filters_nothing(repo):
+    patient = Patient(record_number="123456", bed="2A", unit="U", admission_date=None)
+    patient_id = repo.upsert_patient(patient)
+    old_note = (
+        "01/07/2026 08:00 - Profissional Teste Um (Medico clinico)\n"
+        "Solicitada tomografia de abdome.\n\n"
+    )
+    _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(old_note))
+    assert len(repo.get_active_pending_items(patient_id)) == 1  # sem data de internação, nunca descarta

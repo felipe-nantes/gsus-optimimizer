@@ -689,6 +689,38 @@ def _days_beyond_cap(day_rows: list[list[str]], max_days_to_open: int) -> set[st
     return {toggle_id for toggle_id, date in dated if date and toggle_id not in keep}
 
 
+def _current_episode_card_id(page: Frame | Page) -> str:
+    """DEC-119: id do `div.card_body[id^="historicoAtendimento"]` cujo
+    cabeçalho (irmão anterior, ou primeiro filho do mesmo pai) contém o
+    marcador da internação atual ("Permanece Internado"). Devolve '' quando
+    não há EXATAMENTE um card assim, quando a página não responde ou quando
+    a resposta não é texto -- quem chama cai no critério antigo (episódio
+    aberto). Só lê texto de cabeçalho, nunca o conteúdo dos dias."""
+    try:
+        result = page.evaluate(
+            """(marker) => {
+                const bodies = Array.from(document.querySelectorAll('div.card_body[id^="historicoAtendimento"]'));
+                const hits = [];
+                for (const body of bodies) {
+                    const parts = [];
+                    if (body.previousElementSibling) {
+                        parts.push(body.previousElementSibling.textContent || '');
+                    }
+                    const parent = body.parentElement;
+                    if (parent && parent.firstElementChild && parent.firstElementChild !== body) {
+                        parts.push(parent.firstElementChild.textContent || '');
+                    }
+                    if (parts.join(' ').includes(marker)) hits.push(body.id);
+                }
+                return hits.length === 1 ? hits[0] : '';
+            }""",
+            CURRENT_ADMISSION_MARKER,
+        )
+    except PlaywrightError:
+        return ""
+    return result if isinstance(result, str) else ""
+
+
 def _collect_days(
     page: Frame | Page,
     deadline: float,
@@ -750,10 +782,33 @@ def _collect_days(
         raise GSUSRecordError("Não foi possível listar os dias da internação (sessão instável).") from exc
 
     if current_episode_only:
-        visible_rows = [row for row in day_rows if row[2]]
+        # DEC-119 (achado real 2026-09-07): `extract_notes` expande TODOS os
+        # episódios antes de chegar aqui (`_expand_all`), então "card aberto"
+        # não distingue mais a internação atual dos episódios antigos -- 109
+        # dos 183 pacientes ativos tinham dias de 2014-2025 capturados e 77
+        # pendências de regra nasceram deles. Agora identifica o card da
+        # internação atual pelo cabeçalho que carrega o marcador "Permanece
+        # Internado" (o mesmo sinal já provado em `open_current_admission`) e
+        # fica só com os dias dele; o critério antigo (episódio aberto) vira
+        # fallback quando o cabeçalho não é localizado de forma inequívoca.
+        current_card = _current_episode_card_id(page)
+        if current_card and any(row[1] == current_card for row in day_rows):
+            visible_rows = [row for row in day_rows if row[1] == current_card]
+            criterion = "cabeçalho da internação atual"
+        else:
+            visible_rows = [row for row in day_rows if row[2]]
+            criterion = "episódio aberto na tela (cabeçalho não localizado)"
         ignored = len(day_rows) - len(visible_rows)
         if ignored:
-            logger.info("Ignorando %d dia(s) de internação anterior (fora do escopo da rotina).", ignored)
+            logger.info(
+                "Ignorando %d dia(s) de internação anterior (fora do escopo da rotina; critério: %s).",
+                ignored, criterion,
+            )
+        elif not current_card and len(day_rows) > 1:
+            logger.warning(
+                "Card da internação atual não identificado pelo cabeçalho -- todos os %d dia(s) tratados como atuais.",
+                len(day_rows),
+            )
         day_rows = visible_rows
 
     day_rows = [row[:2] for row in day_rows]

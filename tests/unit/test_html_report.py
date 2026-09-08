@@ -386,3 +386,28 @@ def test_report_service_indicators_safe_on_empty_database(tmp_path):
 
     assert '<div class="indicators">' in content
     assert "Nenhum paciente ativo nesta execução." in content
+
+
+# ------------------------------------------------------------- DEC-119
+
+def test_report_shows_evidence_dates_in_brazilian_format(tmp_path):
+    """Pedido do pagador (DEC-119): data e hora em formato brasileiro -- a
+    data da evidência saía crua em ISO."""
+    repo = _setup_repo(tmp_path)
+    patient_id = repo.upsert_patient(Patient(record_number="998", bed="9B", unit="Clínica Médica"))
+    run_id = repo.start_run()
+    repo.enqueue_patients(run_id, [patient_id])
+    repo.mark_processing(run_id, patient_id)
+    repo.mark_done(run_id, patient_id)
+    repo.save_patient_state(patient_id, "Contexto.", "Estável.")
+    pending_id = repo.add_pending_item(
+        patient_id, "DIAGNOSTICO", "Aguarda RM", "Solicito RM de coluna lombar.", "2026-08-20T09:32:00",
+    )
+    repo.add_pending_item_evidence(pending_id, "2026-08-21T00:00:00", "Mantém aguardo de RM.")
+
+    output = generate_report(repo, run_id, "Clínica Médica", tmp_path / "relatorio.html")
+    content = output.read_text(encoding="utf-8")
+
+    assert "Evidência 1: 20/08/2026 09:32" in content
+    assert "Evidência 2: 21/08/2026" in content  # meia-noite exata = data sem hora
+    assert "2026-08-20T09:32:00" not in content

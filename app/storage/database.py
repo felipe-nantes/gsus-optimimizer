@@ -4,8 +4,81 @@ Tabelas conforme PROJECT_SPEC.md secao 6 (RF-11) / prompt mestre secao 17.
 """
 from __future__ import annotations
 
+import logging
+import re
 import sqlite3
 from pathlib import Path
+
+from app.analysis.priority import pre_admission_cutoff_iso
+
+logger = logging.getLogger(__name__)
+
+# DEC-119: `evidence_date`/`timestamp` gravados no formato da evolução
+# ("DD/MM/AAAA[ HH:MM[:SS]]") por análises anteriores à normalização.
+_BR_DATETIME_RE = re.compile(r"^(\d{2})/(\d{2})/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$")
+_ISO_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _iso_from_br_datetime(raw: str) -> str | None:
+    match = _BR_DATETIME_RE.match(raw.strip())
+    if not match:
+        return None
+    day, month, year, hour, minute, second = match.groups()
+    return f"{year}-{month}-{day}T{hour or '00'}:{minute or '00'}:{second or '00'}"
+
+
+def _normalize_stored_dates(conn: sqlite3.Connection) -> int:
+    """DEC-119 (achado real 2026-09-07): 111 de 204 pendências ativas do LLM
+    tinham `evidence_date` em "DD/MM/AAAA[ HH:MM]" -- `hours_elapsed_since`
+    só lê ISO e o censo mostrava "tempo indeterminado" onde havia data.
+    Converte o que já está gravado; idempotente (só casa o formato DD/MM)."""
+    fixed = 0
+    targets = (
+        ("pending_items", "evidence_date", "pending_id"),
+        ("pending_item_evidence", "timestamp", "evidence_id"),
+    )
+    for table, column, key in targets:
+        rows = conn.execute(
+            f"SELECT {key} AS key, {column} AS value FROM {table} WHERE {column} LIKE '__/__/____%'"
+        ).fetchall()
+        for row in rows:
+            iso = _iso_from_br_datetime(row["value"])
+            if iso:
+                conn.execute(f"UPDATE {table} SET {column} = ? WHERE {key} = ?", (iso, row["key"]))
+                fixed += 1
+    if fixed:
+        logger.info("DEC-119: %d data(s) de evidência convertida(s) de DD/MM para ISO", fixed)
+    return fixed
+
+
+def _purge_rule_items_before_admission(conn: sqlite3.Connection) -> int:
+    """DEC-119 (achado real 2026-09-07): 77 pendências de REGRA ativas tinham
+    evidência anterior à internação atual (2022-2025 em pacientes admitidos
+    em 2026) -- dias de episódios antigos que a extração deixou passar. Nunca
+    foram pendências válidas e, como pendência de regra não se resolve por
+    ausência (DEC-064), ficariam no censo pra sempre com tempo de "anos".
+    Remove (item + evidências extras). Mesma folga do orchestrator
+    (`PRE_ADMISSION_GRACE_DAYS`) -- pronto-socorro antes da admissão formal
+    continua valendo. Idempotente; sem data de internação, não mexe."""
+    rows = conn.execute(
+        "SELECT pi.pending_id AS pending_id, pi.evidence_date AS evidence_date, p.admission_date AS admission_date "
+        "FROM pending_items pi JOIN patients p ON p.patient_id = pi.patient_id "
+        "WHERE pi.source = 'RULE' AND pi.status = 'ACTIVE' AND pi.evidence_date IS NOT NULL"
+    ).fetchall()
+    doomed = []
+    for row in rows:
+        cutoff = pre_admission_cutoff_iso(row["admission_date"])
+        evidence = row["evidence_date"] or ""
+        if cutoff and _ISO_DATE_PREFIX_RE.match(evidence) and evidence[:10] < cutoff:
+            doomed.append(row["pending_id"])
+    for pending_id in doomed:
+        conn.execute("DELETE FROM pending_item_evidence WHERE pending_id = ?", (pending_id,))
+        conn.execute("DELETE FROM pending_items WHERE pending_id = ?", (pending_id,))
+    if doomed:
+        logger.warning(
+            "DEC-119: %d pendência(s) de regra com evidência anterior à internação atual removida(s)", len(doomed),
+        )
+    return len(doomed)
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -246,3 +319,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for column, sql_type in pending_new_columns.items():
         if column not in existing_pending_columns:
             conn.execute(f"ALTER TABLE pending_items ADD COLUMN {column} {sql_type}")
+
+    # DEC-119: correções de DADOS já gravados (não de schema), idempotentes.
+    # Primeiro normaliza as datas (a poda compara texto ISO), depois poda.
+    _normalize_stored_dates(conn)
+    _purge_rule_items_before_admission(conn)

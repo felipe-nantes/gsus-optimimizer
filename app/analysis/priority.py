@@ -9,9 +9,10 @@ retreinar/reformular prompt.
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from app.analysis.sla_config import is_over_sla
+from app.extraction.normalizer import normalize_iso_date
 from app.analysis.taxonomy import (
     CATEGORY_DIAGNOSTICO,
     CATEGORY_INTERCONSULTA,
@@ -97,6 +98,24 @@ def days_since_admission(admission_date: str | None, today: date | None = None) 
             return None
     reference = today if today is not None else date.today()
     return max((reference - parsed).days, 0)
+
+
+# DEC-119: evolução datada até esta folga ANTES da "Data de Internação" do
+# censo ainda conta como internação atual -- o paciente costuma passar dias
+# no pronto-socorro antes da admissão formal, e um exame pedido lá é
+# pendência real. Além disso é episódio antigo (o bug real eram anos).
+PRE_ADMISSION_GRACE_DAYS = 7
+
+
+def pre_admission_cutoff_iso(admission_date: str | None) -> str | None:
+    """`AAAA-MM-DD` a partir do qual uma evolução pertence à internação
+    atual (admissão menos a folga), ou None quando a data de internação é
+    ausente/irreconhecível -- nesse caso nada é filtrado (nunca descarta por
+    palpite). Aceita o formato real do censo (DD/MM/AAAA, DEC-099) e ISO."""
+    iso = normalize_iso_date(admission_date)
+    if not iso:
+        return None
+    return (date.fromisoformat(iso) - timedelta(days=PRE_ADMISSION_GRACE_DAYS)).isoformat()
 
 
 def is_edd_overdue(edd_status: str | None, edd_data: str | None, today: date | None = None) -> bool:

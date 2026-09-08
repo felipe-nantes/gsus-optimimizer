@@ -286,6 +286,8 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  `GSUSAuditoria-Setup.exe` 120,0 MB, SHA-256 2CB17C12...9718 -- substitui o de DEC-115.
                  REGENERADO 1.3.0 (DEC-117, disjuntor de GSUS): novo `GSUSAuditoria-Setup.exe`
                  120,0 MB, SHA-256 85A908F2...C717 -- substitui o de DEC-116.
+                 REGENERADO 1.4.0 (DEC-119, datas/episódios antigos): novo `GSUSAuditoria-Setup.exe`
+                 120,0 MB, SHA-256 89957D41...60FC -- substitui o de DEC-117.
 [x] E2E-001      Teste em máquina limpa (sem Python/Playwright/llama.cpp pré-instalados) --
                  marcado como não feito por muito tempo por engano: na prática, extensivamente
                  executado nesta máquina real desde 2026-08-26 (login headless, paginação de
@@ -605,6 +607,22 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  Fase 1 após 6 (run FAILED, diagnóstico FALHA_GSUS com atenção, status
                  `ABORTED_GSUS` na tela). Pior caso ~15 min em vez das 2 h reais do dia. +11 testes.
                  PENDENTE: exercitar contra o GSUS real (só fakes nesta sessão).
+[x] DATA-001     Datas da IA normalizadas antes de persistir + migração dos registros já gravados
+                 (2026-09-07, DEC-119): 111 pendências com evidence_date em DD/MM mostravam "tempo
+                 indeterminado"; `normalize_llm_datetime`/`normalize_iso_date`; relatório em formato
+                 brasileiro (pedido do pagador).
+[x] DATA-002     Episódios antigos fora das regras/LLM (2026-09-07, DEC-119): card da internação atual
+                 pelo cabeçalho "Permanece Internado" em `_collect_days` (fallback: episódio aberto) +
+                 guarda `admissão - 7 dias` no orchestrator; migração remove 77 pendências de regra
+                 com evidência anterior à internação. PENDENTE: confirmar no log da próxima auditoria
+                 real qual critério de card foi usado.
+[ ] EDD-001      Previsão de alta RELATIVA ("alta em 48h", "previsão de alta amanhã") ancorada na
+                 data da evolução -- hoje só data explícita conta (199/200 análises sem EDD, embora
+                 "previsão de alta" apareça em 144 evoluções). Mudança de regra clínica: precisa da
+                 validação do pagador antes de implementar.
+[ ] UI-008       Pedidos do pagador (2026-09-07): censo por unidade em destaque com ampliação; cor nos
+                 números de dia verde/vermelho no relatório; painel dizer "aguardando análise de IA"
+                 em vez de traço; renomear "tempo mediano de resolução".
 [x] REPORT-002   Relatório HTML alinhado à mesma referência visual (DEC-113): cartões arredondados,
                  hierarquia tipográfica, tabelas claras, tags e destaques laranja, responsivo
                  para telas menores. Prévia segura reproduzível em `scripts/preview_report.py`,
