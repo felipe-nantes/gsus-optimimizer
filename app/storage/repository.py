@@ -20,6 +20,11 @@ RUN_STATUS_FAILED = "FAILED"
 # UI-006 (2026-09-04): encerrada pelo usuário no meio (botão "Encerrar") --
 # Fase 1 parou entre um paciente e outro, nada ficou meio-gravado.
 RUN_STATUS_CANCELLED = "CANCELLED"
+# RESIL-016 (2026-09-08): o processo morreu no meio (máquina desligada,
+# encerramento pelo sistema, sessão do terminal fechada) sem nunca escrever
+# um status final -- a run seguinte fecha essas linhas ao começar. Achado
+# real: 9 runs RUNNING acumuladas em 5 dias, todas de processos interrompidos.
+RUN_STATUS_INTERRUPTED = "INTERRUPTED"
 
 QUEUE_PENDING = "PENDING"
 QUEUE_PROCESSING = "PROCESSING"
@@ -171,8 +176,37 @@ class Repository:
                         (QUEUE_PENDING, run_id, row["patient_id"]),
                     )
             logger.warning("Resume: %d item(ns) órfão(s) reclassificado(s) na run %s", len(rows), run_id)
+        self._close_abandoned_runs()
         self.conn.commit()
         return orphan_runs
+
+    def _close_abandoned_runs(self) -> int:
+        """RESIL-016: toda run ainda RUNNING neste ponto (início de uma execução
+        nova, antes de `start_run`, sob o lock de execução única) pertence a
+        um processo que já não existe -- marca INTERRUPTED com `finished_at`
+        e as contagens que a fila dela realmente alcançou. Os itens PENDING
+        dela não são retomados: cada execução monta a própria fila a partir
+        do censo do dia (o que faltou entra de novo por lá)."""
+        abandoned = self.conn.execute(
+            "SELECT run_id FROM runs WHERE status = ?", (RUN_STATUS_RUNNING,)
+        ).fetchall()
+        for row in abandoned:
+            counts = self.get_run_counts(row["run_id"])
+            self.conn.execute(
+                "UPDATE runs SET status = ?, finished_at = COALESCE(finished_at, ?), "
+                "patients_found = ?, patients_completed = ?, patients_failed = ?, "
+                "patients_no_admission = ?, patients_awaiting_notes = ? WHERE run_id = ?",
+                (
+                    RUN_STATUS_INTERRUPTED, _now(), counts["found"], counts["completed"],
+                    counts["failed"], counts["no_admission"], counts["awaiting_notes"], row["run_id"],
+                ),
+            )
+        if abandoned:
+            logger.warning(
+                "%d execução(ões) anterior(es) ficaram como RUNNING (processo interrompido no meio) "
+                "-- marcadas como INTERRUPTED.", len(abandoned),
+            )
+        return len(abandoned)
 
     # -------------------------------------------------------------- patients
     def upsert_patient(self, patient: Patient) -> str:

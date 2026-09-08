@@ -477,3 +477,45 @@ def test_mark_awaiting_notes_is_counted_apart_from_errors_and_no_admission(repo)
     ).fetchone()
     assert (run_row["patients_awaiting_notes"], run_row["patients_failed"]) == (1, 0)
 
+
+
+def test_resume_closes_runs_left_running_by_a_dead_process(repo):
+    """RESIL-016: run cujo processo morreu no meio fica RUNNING pra sempre --
+    a execução seguinte fecha como INTERRUPTED, com finished_at e as
+    contagens reais da fila; a run nova, iniciada depois, não é tocada."""
+    from app.storage.repository import RUN_STATUS_INTERRUPTED, RUN_STATUS_RUNNING
+
+    done = repo.upsert_patient(_sample_patient("111"))
+    orphan = repo.upsert_patient(_sample_patient("222"))
+    dead_run = repo.start_run()
+    repo.enqueue_patients(dead_run, [done, orphan])
+    repo.mark_processing(dead_run, done)
+    repo.mark_done(dead_run, done)
+    repo.mark_processing(dead_run, orphan)  # processo morreu aqui
+
+    repo.resume_incomplete_runs()
+    new_run = repo.start_run()
+
+    old = repo.conn.execute(
+        "SELECT status, finished_at, patients_found, patients_completed FROM runs WHERE run_id = ?", (dead_run,)
+    ).fetchone()
+    assert old["status"] == RUN_STATUS_INTERRUPTED
+    assert old["finished_at"] is not None
+    assert (old["patients_found"], old["patients_completed"]) == (2, 1)
+    fresh = repo.conn.execute("SELECT status, finished_at FROM runs WHERE run_id = ?", (new_run,)).fetchone()
+    assert (fresh["status"], fresh["finished_at"]) == (RUN_STATUS_RUNNING, None)
+
+
+def test_resume_leaves_finished_runs_alone(repo):
+    patient = repo.upsert_patient(_sample_patient("111"))
+    run_id = repo.start_run()
+    repo.enqueue_patients(run_id, [patient])
+    repo.mark_processing(run_id, patient)
+    repo.mark_done(run_id, patient)
+    repo.finish_run(run_id, "COMPLETED")
+    finished_at = repo.conn.execute("SELECT finished_at FROM runs WHERE run_id = ?", (run_id,)).fetchone()[0]
+
+    repo.resume_incomplete_runs()
+
+    row = repo.conn.execute("SELECT status, finished_at FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+    assert (row["status"], row["finished_at"]) == ("COMPLETED", finished_at)
