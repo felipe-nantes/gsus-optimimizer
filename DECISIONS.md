@@ -2347,3 +2347,13 @@ Assimetria de risco deliberada: um falso positivo aqui (tratar um censo genuinam
 3. Mesmo instalador 1.5.1 (nunca instalado antes desta correção).
 
 **Verificação:** +3 testes de adapter (sucesso, falha, fallback). Validação real: a execução seguinte, se a degradação de fim de censo se repetir. **Impacto:** `app/gsus/adapter.py`, `app/update_flow.py`.
+
+---
+
+## DEC-128 -- Segunda variante do instalador com o modelo de IA embutido (BUNDLE-001)
+
+**Contexto (2026-09-09):** pedido do patrocinador do projeto pra validar o produto e ja usa-lo na pratica. O instalador padrao (120MB) baixa o modelo (~4,92GB) do Hugging Face na 1a execucao (DEC-072) -- funciona, mas depende da rede do hospital alcancar huggingface.co, nunca exercitado de ponta a ponta neste projeto contra a URL real (so testes com download simulado).
+
+**Decisao:** installer/gsus-auditoria.iss ganha uma 2a variante, ativada por `/DBundleModel` na linha de comando do ISCC, que copia o .gguf ja validado (`ModelSourcePath`, fora do repositorio, mesmo tratamento de runtime/ e playwright-browsers/) direto pra `{app}\models\model.gguf` durante a instalacao -- `ensure_model_downloaded` (idempotente, so checa `model_path.exists()`) pula o download por completo. `nocompression` no arquivo do modelo (ja e dado quantizado, denso; lzma2 gastaria dezenas de minutos pra pouco ganho). A variante padrao (sem a flag) continua byte-a-byte igual a antes -- mesmo `.spec`, mesmo `dist/`, mesma logica de download. Saida: `GSUSAuditoria-Setup.exe` (~120MB, online) e `GSUSAuditoria-Setup-ComIA.exe` (~5GB, offline).
+
+**Verificacao:** os dois instaladores compilados e com hash registrado no build. **Impacto:** so `installer/gsus-auditoria.iss` -- nenhum codigo do app mudou.
