@@ -7,6 +7,8 @@ teve um bug real esconde o problema; gritar "erro grave" a cada instabilidade
 comum do GSUS cansa o auditor e ele passa a ignorar o aviso."""
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.analysis import run_diagnosis
 
 
@@ -77,6 +79,23 @@ def test_raw_playwright_error_classified_as_gsus_cause():
 
     outcome, _summary = run_diagnosis.classify_top_level_exception(PlaywrightError("Frame was detached"))
     assert outcome == run_diagnosis.OUTCOME_FALHA_GSUS
+
+
+@pytest.mark.parametrize("message", [
+    "BrowserType.launch: Executable doesn't exist at C:\\app\\playwright-browsers\\firefox-1466\\firefox.exe",
+    "Looks like Playwright was just installed or updated. Please run the following command: playwright install",
+])
+def test_missing_bundled_browser_is_local_install_problem_not_gsus(message):
+    """DIAG-002 (achado 2026-09-04, DEC-114): o navegador interno ausente
+    chega como `playwright.Error` e era rotulado "o GSUS não respondeu a
+    tempo" -- 7 vezes na instância de dev, com o Firefox simplesmente
+    inexistente. O auditor precisa ler que é a instalação desta máquina."""
+    from playwright.sync_api import Error as PlaywrightError
+
+    outcome, summary = run_diagnosis.classify_top_level_exception(PlaywrightError(message))
+    assert outcome == run_diagnosis.OUTCOME_FALHA_INESPERADA
+    assert "navegador interno" in summary
+    assert "reinstale" in summary
 
 
 def test_missing_credential_classified_as_needs_setup_not_gsus():

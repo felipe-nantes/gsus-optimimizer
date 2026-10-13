@@ -54,3 +54,14 @@ def test_pseudonym_is_stable_and_hides_identifier():
     assert label != pseudonym.for_log("262532")  # distingue pacientes
     assert pseudonym.for_log(None) == "(sem-id)"
     assert pseudonym.for_log("") == "(sem-id)"
+
+
+def test_missing_bundled_browser_says_reinstall_like_the_run_diagnosis():
+    """DIAG-002: a barra de status e a faixa de diagnóstico precisam dizer a
+    mesma coisa -- navegador interno ausente é instalação, não "tente de novo"."""
+    from playwright.sync_api import Error as PlaywrightError
+
+    msg = friendly_message(PlaywrightError("BrowserType.launch: Executable doesn't exist at C:/x/firefox.exe"))
+    assert "navegador interno" in msg
+    assert "Reinstale" in msg
+    assert "firefox.exe" not in msg  # nunca vaza detalhe técnico

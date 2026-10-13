@@ -98,6 +98,17 @@ def classify_top_level_exception(exc: Exception) -> tuple[str, str]:
     except ImportError:  # pragma: no cover -- só em ambiente sem playwright instalado
         PlaywrightError = ()  # type: ignore[assignment]
 
+    # DIAG-002 (achado 2026-09-04, DEC-114): o navegador interno ausente
+    # chega como `playwright.Error` -- sem esta checagem ANTES do ramo
+    # Playwright, virava "o GSUS não respondeu a tempo" (7 vezes na instância
+    # de dev), quando o problema é a instalação desta máquina.
+    message = str(exc)
+    if "Executable doesn't exist" in message or "playwright install" in message:
+        return OUTCOME_FALHA_INESPERADA, (
+            "O navegador interno do programa não foi encontrado nesta máquina, então a "
+            "atualização nem chegou a acessar o GSUS. Não é instabilidade do GSUS: reinstale "
+            "o programa ou acione o suporte técnico."
+        )
     if isinstance(exc, (GSUSLoginError, GSUSCensusError)) or (PlaywrightError and isinstance(exc, PlaywrightError)):
         return OUTCOME_FALHA_GSUS, (
             "Não foi possível concluir o acesso ao GSUS (login ou obtenção da lista de "

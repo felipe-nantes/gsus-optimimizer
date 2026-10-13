@@ -36,4 +36,13 @@ def friendly_message(exc: BaseException) -> str:
         return "O módulo de análise local não pôde ser usado. A atualização continuou sem ele."
     if isinstance(exc, TimeoutError):
         return "O GSUS demorou demais para responder. O sistema pode tentar novamente."
+    # DIAG-002: mesma leitura do diagnóstico da execução
+    # (`run_diagnosis.classify_top_level_exception`) -- a barra de status não
+    # pode dizer "tente novamente" enquanto a faixa diz "reinstale".
+    message = str(exc)
+    if "Executable doesn't exist" in message or "playwright install" in message:
+        return (
+            "O navegador interno do programa não foi encontrado nesta máquina. Reinstale o "
+            "programa ou acione o suporte técnico."
+        )
     return "Não foi possível concluir a operação. O sistema pode tentar novamente."
