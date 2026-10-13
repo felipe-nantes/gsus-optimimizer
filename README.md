@@ -17,7 +17,7 @@ Esse projeto nasceu de um mestrado profissional no Hospital Universitário Regio
 - Compara com o que já foi lido antes (hash por evolução) para processar só o que é novo - não relê o histórico inteiro a cada execução.
 - Aplica regras determinísticas para pendências objetivas (exame sem resultado, interconsulta sem parecer) e manda pro modelo de linguagem local só o que precisa de interpretação de texto livre.
 - Gera um relatório HTML por setor e leito, com o que está pendente, a evidência textual de cada item e há quanto tempo está parado.
-- Roda de novo sozinho, em horário agendado, e também sob demanda com um clique.
+- Roda de novo sozinho, em horário agendado, e também sob demanda com um clique. Se o auditor quiser, desliga o computador ao fim da atualização da madrugada (com aviso de 3 minutos e sem desligar se alguém estiver usando a máquina).
 
 Toda pendência que o sistema aponta vem junto com o trecho da evolução que a sustenta. Nunca é "o paciente parece estar aguardando algo" sem mostrar onde no texto está escrito isso - e a decisão sobre o que fazer com aquela pendência continua sendo do auditor.
 

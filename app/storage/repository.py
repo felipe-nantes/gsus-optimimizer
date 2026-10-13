@@ -123,6 +123,23 @@ class Repository:
         self.conn.commit()
         logger.info("Diagnóstico de execução registrado outcome=%s needs_attention=%s", outcome, needs_attention)
 
+    def annotate_latest_run_diagnostic(self, note: str) -> bool:
+        """SCHEDULE-002 (DEC-129): acrescenta uma frase ao diagnóstico mais
+        recente -- usado quando a opção "desligar ao terminar" estava ligada
+        e o computador NÃO desligou, pra o auditor ver o motivo na faixa da
+        tela principal (não só no log técnico). False se não há diagnóstico."""
+        row = self.conn.execute(
+            "SELECT diagnostic_id, summary FROM run_diagnostics ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return False
+        self.conn.execute(
+            "UPDATE run_diagnostics SET summary = ? WHERE diagnostic_id = ?",
+            (f"{row['summary']} {note}".strip(), row["diagnostic_id"]),
+        )
+        self.conn.commit()
+        return True
+
     def get_latest_run_diagnostic(self) -> dict | None:
         row = self.conn.execute(
             "SELECT run_id, created_at, outcome, summary, needs_attention "

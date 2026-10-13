@@ -10,6 +10,7 @@ from typing import Callable
 from app import config, scheduling
 from app.security import credentials
 from app.ui.icons import line_icon, logo_mark
+from app.ui.widgets import ToggleSwitch
 from app.ui.main_window import (
     BG_COLOR,
     BRAND_COLOR,
@@ -33,7 +34,7 @@ class SetupWindow:
         self.app_config = app_config
         self.on_complete = on_complete
 
-        root.geometry("820x590")
+        root.geometry("820x660")  # SCHEDULE-002: +1 linha (desligar ao terminar)
         # REPORT-004/DEC-099: `MainWindow` (tela única) tornou a janela raiz
         # redimensionável -- esta tela precisa voltar a fixar o tamanho
         # explicitamente, já que `app/main.py::render` só troca os widgets,
@@ -149,13 +150,36 @@ class SetupWindow:
         self.schedule_var = tk.StringVar(value=app_config.schedule_time)
         ttk.Entry(form, textvariable=self.schedule_var).grid(row=8, column=0, sticky="ew", padx=20)
 
+        # SCHEDULE-002 (pedido do auditor, DEC-129): desligar o PC ao fim da
+        # atualização agendada. Mesmo interruptor da tela principal
+        # (`ToggleSwitch`); só é gravado ao clicar CONCLUIR, junto do resto.
+        shutdown_row = tk.Frame(form, bg=CARD_BG)
+        shutdown_row.grid(row=9, column=0, sticky="ew", padx=20, pady=(16, 0))
+        shutdown_row.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            shutdown_row, text="Desligar o computador ao terminar a atualização da madrugada",
+            bg=CARD_BG, fg=TEXT_PRIMARY, font=(FONT_FAMILY, 9, "bold"), anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            shutdown_row, bg=CARD_BG, fg=TEXT_MUTED, font=(FONT_FAMILY, 8), anchor="w", justify="left",
+            wraplength=400,
+            text=(
+                "Só vale para a atualização automática. Antes de desligar aparece um aviso de "
+                "3 minutos com opção de cancelar; se alguém estiver usando o computador, ele não desliga."
+            ),
+        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.shutdown_switch = ToggleSwitch(
+            shutdown_row, value=app_config.shutdown_after_scheduled_run, bg=CARD_BG,
+        )
+        self.shutdown_switch.grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
+
         ttk.Button(
             root, text="CONCLUIR", command=self._on_submit, style="Primary.TButton", width=24,
-        ).grid(in_=form, row=9, column=0, sticky="ew", padx=20, pady=(20, 12))
+        ).grid(in_=form, row=10, column=0, sticky="ew", padx=20, pady=(18, 12))
         tk.Label(
             form, text="A senha é protegida pelo Windows e não aparece nos relatórios.",
             font=(FONT_FAMILY, 8), bg=CARD_BG, fg=TEXT_MUTED,
-        ).grid(row=10, column=0, pady=(0, 18))
+        ).grid(row=11, column=0, pady=(0, 18))
         username_entry.focus_set()
 
     def _on_submit(self) -> None:
@@ -184,6 +208,7 @@ class SetupWindow:
         self.app_config.gsus_username = username
         self.app_config.unit = unit
         self.app_config.schedule_time = schedule_time or self.app_config.schedule_time
+        self.app_config.shutdown_after_scheduled_run = self.shutdown_switch.get()
         self.app_config.configured = True
         config.save_config(self.app_config)
         self._register_scheduled_task()

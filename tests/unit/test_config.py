@@ -122,3 +122,23 @@ def test_browser_visible_false_roundtrips_through_config_json(tmp_path, monkeypa
     config.save_config(config.AppConfig(unit="Clínica Médica", configured=True, browser_visible=False), cfg_path)
     assert '"browser_visible": false' in cfg_path.read_text(encoding="utf-8")
     assert config.load_config(cfg_path).browser_visible is False
+
+
+# ------------------------------------------- SCHEDULE-002 (desligar ao terminar)
+
+def test_shutdown_after_scheduled_run_defaults_false_for_old_config(tmp_path, monkeypatch):
+    """Quem atualizar do 1.5.1 tem `config.json` sem a chave -- o computador
+    não pode passar a desligar sozinho sem o auditor ter ligado a opção."""
+    _no_saved_credential(monkeypatch)
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text('{"unit": "Clínica Médica", "configured": true}', encoding="utf-8")
+    assert config.load_config(cfg_path).shutdown_after_scheduled_run is False
+
+
+def test_shutdown_after_scheduled_run_true_roundtrips_through_config_json(tmp_path, monkeypatch):
+    _no_saved_credential(monkeypatch)
+    cfg_path = tmp_path / "config.json"
+    config.save_config(
+        config.AppConfig(unit="Clínica Médica", configured=True, shutdown_after_scheduled_run=True), cfg_path,
+    )
+    assert config.load_config(cfg_path).shutdown_after_scheduled_run is True

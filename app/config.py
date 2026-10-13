@@ -127,6 +127,12 @@ class AppConfig:
     # pra valer também na execução agendada (`--auto-update`). Configs antigas
     # sem a chave carregam o padrão (`from_dict` ignora chave ausente).
     browser_visible: bool = True
+    # SCHEDULE-002 (pedido do auditor, DEC-129): desligar o computador quando
+    # a atualização AGENDADA da madrugada termina, pra máquina não ficar
+    # ligada até de manhã. Desligado por padrão -- configs antigas sem a
+    # chave carregam False (`from_dict` ignora chave ausente). Nunca vale
+    # pro "Atualizar agora" manual (ver `app/shutdown.py`).
+    shutdown_after_scheduled_run: bool = False
     configured: bool = False
 
     def to_dict(self) -> dict:

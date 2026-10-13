@@ -209,6 +209,34 @@ def test_setup_completes_even_when_scheduling_fails(tmp_path, monkeypatch):
         root.destroy()
 
 
+def test_setup_saves_shutdown_option_from_toggle(tmp_path, monkeypatch):
+    """SCHEDULE-002 (pedido do auditor, DEC-129): o interruptor "Desligar o
+    computador ao terminar a atualização da madrugada" começa desligado e é
+    gravado no config.json ao clicar CONCLUIR."""
+    from app.ui import setup_window as setup_window_module
+
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path))
+    monkeypatch.delattr(setup_window_module.sys, "frozen", raising=False)
+    monkeypatch.setattr(setup_window_module.messagebox, "showinfo", lambda *a, **k: None)
+    monkeypatch.setattr(credentials, "get_credential", lambda name: None)
+    monkeypatch.setattr(credentials, "save_credential", lambda name, user, pwd: None)
+
+    root = tk.Tk()
+    try:
+        app_config = config.AppConfig()
+        setup = setup_window_module.SetupWindow(root, app_config)
+        assert setup.shutdown_switch.get() is False
+        setup.shutdown_switch.toggle()
+        setup.username_var.set("12345678900")
+        setup.password_var.set("senha-teste")
+        setup.unit_var.set("Clínica Médica")
+        setup._on_submit()
+        assert app_config.shutdown_after_scheduled_run is True
+        assert config.load_config().shutdown_after_scheduled_run is True
+    finally:
+        root.destroy()
+
+
 # ------------------------------- run_auto_update / --auto-update (SCHEDULE-001)
 # Achado real: a tarefa agendada só abria a janela do app -- não existe
 # humano pra clicar "Atualizar agora" numa execução de madrugada. `main()`

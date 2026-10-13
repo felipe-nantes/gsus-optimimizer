@@ -16,6 +16,7 @@ if __package__ in (None, ""):
 from app import config
 from app.security import credentials
 from app.storage import database
+from app.storage.repository import Repository
 from app.ui.lookup_window import LookupWindow
 from app.ui.icons import apply_window_icon
 from app.ui.main_window import MainWindow
@@ -101,8 +102,10 @@ def run_auto_update() -> None:
         return
 
     report_path = config.get_app_data_dir() / "relatorio.html"
+    ran = False
     try:
         result = run_update(app_config, report_path, progress=log.info)
+        ran = True
         log.info("Atualização automática concluída: %s", result.counts)
     except UpdateAlreadyRunningError:
         # Achado real (DEC-086): a tarefa agendada pode disparar em cima de
@@ -111,7 +114,35 @@ def run_auto_update() -> None:
         # uma falha (mesmo padrão do "app não configurado" acima).
         log.warning("Execução automática pulada -- já existe outra atualização em andamento")
     except Exception:
+        ran = True
         log.exception("Atualização automática falhou")
+
+    # SCHEDULE-002 (DEC-129): só depois de uma execução que de fato rodou --
+    # com sucesso ou falha (o motivo aparece na tela de manhã). Nunca quando
+    # ela nem começou: outra atualização em andamento significa alguém
+    # usando o programa agora.
+    if ran:
+        _shutdown_after_scheduled_run(log)
+
+
+def _shutdown_after_scheduled_run(log: logging.Logger) -> None:
+    from app import shutdown
+
+    try:
+        # Relido do disco: a execução pode ter durado a madrugada inteira, e o
+        # auditor pode ter desligado a opção nas Configurações nesse meio tempo.
+        fresh_config = config.load_config()
+        outcome = shutdown.after_scheduled_run(fresh_config)
+        log.info("Desligamento ao fim da atualização: %s", outcome)
+        note = shutdown.DIAGNOSTIC_NOTES.get(outcome)
+        if note:
+            conn = database.init_db(config.get_db_path())
+            try:
+                Repository(conn).annotate_latest_run_diagnostic(note)
+            finally:
+                conn.close()
+    except Exception:
+        log.exception("Falha inesperada na etapa de desligamento -- computador permanece ligado")
 
 
 def build_app() -> tk.Tk:

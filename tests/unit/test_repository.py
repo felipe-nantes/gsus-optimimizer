@@ -559,3 +559,27 @@ def test_edd_inferred_flag_is_preserved_together_with_the_preserved_edd_date(rep
     repo.save_patient_state(patient_id, "ctx3", "st3", edd_data="2026-09-12", edd_status="REGISTRADA")
     state = repo.get_patient_state(patient_id)
     assert (state["edd_data"], state["edd_inferida"]) == ("2026-09-12", 0)
+
+
+# ------------------------------------------------ SCHEDULE-002 (DEC-129)
+
+def test_annotate_latest_run_diagnostic_appends_to_the_newest_only(repo):
+    """Quando a opção "desligar ao terminar" estava ligada e o PC NÃO
+    desligou, o motivo entra na faixa de diagnóstico da tela principal."""
+    repo.save_run_diagnostic(None, "SUCESSO", "Execução antiga.", False)
+    repo.conn.execute("UPDATE run_diagnostics SET created_at = '2000-01-01T00:00:00+00:00'")
+    repo.save_run_diagnostic(None, "SUCESSO", "Atualização concluída.", False)
+
+    assert repo.annotate_latest_run_diagnostic("O computador não foi desligado porque estava em uso.") is True
+
+    latest = repo.get_latest_run_diagnostic()
+    assert latest["summary"] == "Atualização concluída. O computador não foi desligado porque estava em uso."
+    older = repo.conn.execute(
+        "SELECT summary FROM run_diagnostics WHERE created_at LIKE '2000-%'"
+    ).fetchone()
+    assert older["summary"] == "Execução antiga."
+
+
+def test_annotate_latest_run_diagnostic_without_any_diagnostic_is_a_no_op(repo):
+    assert repo.annotate_latest_run_diagnostic("qualquer frase") is False
+    assert repo.get_latest_run_diagnostic() is None
