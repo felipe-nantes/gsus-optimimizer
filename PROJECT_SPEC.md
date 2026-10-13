@@ -88,6 +88,8 @@ RF-29. O relatório deve oferecer, além da visão individual por paciente, uma 
 
 RF-30. Toda saída do LLM deve registrar metadados de auditabilidade: versão/identificação do modelo usado e horário de processamento. Correção/override de um achado pelo auditor (via RF-19-like mecanismo futuro) deve ser possível sem perder o registro original.
 
+RF-31. O sistema deve oferecer, desligada por padrão, a opção de desligar o computador ao fim da atualização AGENDADA (nunca da manual). Antes de desligar, mostra um aviso com contagem regressiva e opção de cancelar; não desliga se o computador estiver em uso, se houver outra sessão do Windows aberta ou se o aviso não puder ser exibido; nunca força o fechamento de programas (trabalho não salvo mantém o computador ligado). Quando o computador não desliga, o motivo aparece em linguagem simples no diagnóstico da tela principal. Pedido do auditor -- ver DECISIONS.md DEC-129 (SCHEDULE-002).
+
 ## 7. Requisitos não funcionais
 
 RNF-01. Instalável em Windows 10/11 x64 limpo, sem exigir Python/Node/Docker/Ollama/Playwright/dev tools pré-instalados.
