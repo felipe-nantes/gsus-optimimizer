@@ -49,6 +49,9 @@ class FakeClient:
     def __init__(self, base_url, **kwargs):
         self.page = object()
         self.base_url = base_url
+        # RESIL-019 (1.5.1): `update_flow` repassa `client.timeout_ms` pro
+        # adapter (contexto novo no relogin) -- mesmo default do GSUSClient real.
+        self.timeout_ms = kwargs.get("timeout_ms", 30_000)
         FakeClient.launched_headless.append(bool(kwargs.get("headless", False)))
 
     def __enter__(self):
@@ -62,7 +65,7 @@ class FakeClient:
 
 
 class FakeAdapterOk:
-    def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None):
+    def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None, context_timeout_ms=None):
         pass
 
     def get_census(self):
@@ -232,7 +235,7 @@ def test_update_flow_maps_not_implemented_error_to_friendly_message(tmp_path, mo
     from app.gsus import client as gsus_client_module
 
     class FakeAdapterBlocked:
-        def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None):
+        def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None, context_timeout_ms=None):
             pass
 
         def get_census(self):
@@ -278,7 +281,7 @@ class FakeAdapterSlowThreePatients:
 
     started = threading.Event()
 
-    def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None):
+    def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None, context_timeout_ms=None):
         pass
 
     def get_census(self):
@@ -391,7 +394,7 @@ def test_error_in_background_mode_adds_hint_to_switch_back(tmp_path, monkeypatch
     from app.gsus import client as gsus_client_module
 
     class FakeAdapterLoginFails:
-        def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None):
+        def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None, context_timeout_ms=None):
             pass
 
         def get_census(self):
@@ -428,7 +431,7 @@ def test_gsus_unresponsive_breaker_shows_clear_status(tmp_path, monkeypatch):
     from app.gsus.records import GSUSSearchUnresponsiveError
 
     class FakeAdapterUnresponsive:
-        def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None):
+        def __init__(self, page, username, password, unit, base_url=None, max_days_per_patient=None, context_timeout_ms=None):
             pass
 
         def get_census(self):
