@@ -2525,3 +2525,36 @@ O usuário pediu um plano de execução no mesmo modelo do DEC-099, sem nenhuma 
 **Impacto:** nenhuma mudança de código nesta sessão.
 - TASKS.md ganha UI-009, UI-010, SCHEDULE-002, LLM-006, PEND-001, PEND-002, EDD-002, EDD-003, LOOKUP-001 e ACCEPT-001.
 - PROJECT_SPEC.md só muda quando cada fase for aprovada (RF-19, RF-23, RF-27, RF-30 e um RF novo de desligamento).
+
+**Decisões do usuário após a aprovação (2026-10-13):** a Fase 1 NÃO sai sozinha como 1.5.2; tudo vai junto na 1.6.0. Não havia alteração pendente no outro computador.
+
+**Fase 1 implementada (2026-10-13): UI-009, UI-010, SCHEDULE-002 e DIAG-002.**
+- **UI-009:** "Ampliar" no censo de pacientes, numa janela própria e reaproveitada, com filtro e ordenação independentes da tela principal. A montagem e o preenchimento da tabela viraram funções compartilhadas pelas duas.
+- **UI-010:** o nome em português da EDD fica em constantes únicas de `dashboard_metrics.py`. Na dashboard, os rótulos ocupam duas linhas: a prévia com dados fictícios em 1024 px mostrou que, numa linha só, a faixa secundária invadia os vizinhos.
+- **DIAG-002:** a mesma leitura vale para a faixa de diagnóstico e para a barra de status.
+- **SCHEDULE-002:** ver TASKS.md.
+
+**Revisão adversarial antes do commit:** 4 revisores em paralelo e um verificador cético por achado. Resultado: 8 confirmados (3 eram o mesmo problema) e 5 refutados. O principal mudou o desenho do desligamento: no `shutdown.exe`, qualquer `/t` maior que zero IMPLICA `/f`, como diz a ajuda do próprio Windows desta máquina, lida sem executar o comando. O plano original (`shutdown /s /t 180` + `shutdown /a` para cancelar) fecharia à força programas com trabalho não salvo, o contrário do que a decisão 7 pretendia.
+
+**Desenho final do desligamento:**
+1. A contagem de 3 min acontece no aplicativo.
+2. Só ao fim dela roda `shutdown /s /t 0`, sem `/f`. Com tempo zero, um programa com alteração não salva segura o desligamento. Se o processo morrer no meio, nada é enviado ao Windows.
+3. Antes da contagem, e de novo depois dela, o sistema confere uso recente (`GetLastInputInfo`) e se a sessão na frente da máquina é a do próprio processo (`WTSGetActiveConsoleSessionId`). Essa segunda checagem cobre a troca rápida de usuário, que `GetLastInputInfo` não enxerga.
+4. A opção é relida do disco no fim da execução: o auditor pode tê-la desligado durante a madrugada.
+5. Sem janela de aviso, não desliga.
+6. Quando o PC fica ligado, o motivo vira uma frase na faixa de diagnóstico da tela principal.
+7. A trava contra desligar a máquina dentro do pytest compara com a função real guardada no import. Antes, um teste que trocasse `subprocess.run` (padrão do projeto) passava pela trava.
+
+**Outro achado da revisão:** o "Ampliar" não restaurava janela minimizada, nos dois censos.
+
+**Segunda revisão adversarial, sobre as correções:** 2 revisores e um verificador por achado; 3 confirmados (todos de baixo impacto) e 5 refutados.
+- Sem `/f`, o Windows recusa desligar com outra conta ainda conectada (código 1191). A faixa diria "regra de segurança"; agora esse caso usa a nota de "outra sessão".
+- A nota de outra sessão dizia "outra pessoa", o que também é falso na troca de usuário ou no acesso remoto do próprio auditor. Texto neutro.
+- Com duas janelas do programa abertas, o interruptor do navegador salvava a configuração inteira da memória e podia religar a opção de desligar. Agora relê do disco e muda só o próprio campo.
+
+**Verificação:**
+- Suíte unitária + E2E: 528 aprovados.
+- Integração: 24 aprovados e os mesmos 10 erros conhecidos de Chromium.
+- Prévias com dados fictícios: dashboard em 1024×700 e 1280×860, janela ampliada, Configurações e janela de aviso.
+
+**Pendente:** validação real do desligamento no PC de produção, com o usuário presente. Ela confere a política do Windows do hospital e o comportamento com a tela bloqueada. As respostas do auditor à pergunta 1 podem ajustar os padrões adotados.

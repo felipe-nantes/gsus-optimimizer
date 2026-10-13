@@ -1396,3 +1396,35 @@ Proxima task: design/UX da tela (pedido explicito anterior do usuario) apos a en
 1. Aprovação do plano pelo usuário.
 2. Envio das perguntas ao auditor.
 3. Fase 1: UI-009, UI-010 e SCHEDULE-002.
+
+---
+
+## 2026-10-13 (2) — Fase 1 dos ajustes do auditor implementada (UI-009, UI-010, SCHEDULE-002, DIAG-002)
+
+**Pedido do usuário:** plano aprovado ("O plano ta aprovado"). Tudo sai na 1.6.0, sem 1.5.2 separada. Não havia alteração pendente no outro computador. As 21 perguntas foram ao auditor sem sugestões de resposta.
+
+**Feito:**
+- **UI-009:** "Ampliar" no censo de pacientes.
+- **UI-010:** rótulos de EDD com "(data provável de alta)".
+- **SCHEDULE-002:** opção de desligar o computador ao fim da atualização agendada. Há interruptor nas Configurações e aviso na barra lateral, e o motivo aparece na faixa de diagnóstico quando o PC fica ligado.
+- **DIAG-002:** navegador interno ausente deixa de aparecer como "falha do GSUS".
+
+Nenhuma mudança no banco além de leitura e escrita em `run_diagnostics`: não há tabela nem coluna nova.
+
+**Método:**
+- Implementação, depois testes.
+- Prévia com dados fictícios: script `preview_fase1.py` no scratchpad, reaproveitando `scripts/preview_ui.py`, com banco temporário.
+- Revisão adversarial em workflow, com 4 revisores e um verificador cético por achado: 8 confirmados e 5 refutados. O principal: `shutdown /t` maior que 0 implica `/f`, o que forçaria o fechamento de programas com trabalho não salvo. O desligamento foi redesenhado (detalhe no adendo do DEC-129).
+- Segunda revisão adversarial sobre as correções: 3 achados de baixo impacto confirmados e corrigidos. São eles: a mensagem certa quando o Windows recusa por outra conta conectada, um texto neutro para outra sessão, e o interruptor do navegador que não sobrescreve mais opções salvas por outra janela.
+
+**Testes:**
+- Unitários + E2E: 528 aprovados (eram 489).
+- Integração: 24 aprovados e os mesmos 10 erros conhecidos de Chromium.
+
+Nenhum teste executa `shutdown.exe`: há runner falso e uma trava que recusa o comando real dentro do pytest.
+
+**Pendente:**
+- Commit local da Fase 1 e push depois da aprovação do usuário.
+- Validação real do desligamento no PC de produção, com o usuário presente.
+- Respostas do auditor.
+- Fase 2 (LLM-006).

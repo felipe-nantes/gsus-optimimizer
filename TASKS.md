@@ -665,7 +665,12 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  desligada de noite) calculado ao vivo, faixa nova na tela principal.
                  Testes: +19 unitários (classificação pura) +4 e2e (grava certo nos 3
                  desfechos, incluindo o cenário antes invisível). Suíte completa: 386 passed.
-[ ] DIAG-002     Erro de ambiente rotulado como "falha do GSUS" (achado 2026-09-04, DEC-114):
+[x] DIAG-002     Erro de ambiente rotulado como "falha do GSUS" (achado 2026-09-04, DEC-114).
+                 IMPLEMENTADO 2026-10-13 (Fase 1 do DEC-129, de carona): "Executable doesn't
+                 exist"/"playwright install" casados antes do ramo Playwright -> FALHA_INESPERADA
+                 com "reinstale o programa"; `app/ui/errors.py` diz o mesmo na barra de status
+                 (antes dizia "o sistema pode tentar novamente"). Testes: +2 diagnóstico +1 mensagem.
+                 Texto original da proposta:
                  `classify_top_level_exception` devolve FALHA_GSUS para QUALQUER `playwright.Error`,
                  inclusive "Executable doesn't exist" (navegador interno ausente) -- hoje isso
                  registrou 7x "o GSUS não respondeu a tempo" quando o Firefox simplesmente não
@@ -813,26 +818,44 @@ documento "Ajustes solicitados no relatório de auditoria concorrente"; "caso N"
 mínimos de aceitação da seção 7 (cada um vira teste nomeado).
 
 ```
-[ ] UI-009       Fase 1 -- "Ampliar" na tabela de pacientes (seção 9), como no censo por unidade.
-                 `main_window.py`: extrair `_make_census_tree`/`_fill_census_tree` de
-                 `_render_census_tree` (hoje amarrado a `self._census_tree`); Toplevel reaproveitada
-                 enquanto aberta (padrão `_open_unit_census_window`), com filtro, ordenação e
-                 duplo-clique abrindo o relatório; atualizada junto em `_refresh_dashboard`.
-                 Testes: Tk (abre, reaproveita, filtra, duplo-clique). Prévia: `scripts/preview_ui.py`.
-[ ] UI-010       Fase 1 -- "EDD vencida (data provável de alta)" (seção 9): cartão da dashboard
-                 (`main_window.py::KPI_CARDS`) e indicador do relatório (`html_report.py`); mesmo
-                 adendo em "Sem EDD documentada"; cabeçalho curto da coluna da tabela: "Prev. alta".
-                 Testes: relatório + dashboard (nenhum teste atual fixa o texto antigo).
-[ ] SCHEDULE-002 Fase 1 -- "Desligar o computador ao finalizar a atualização" (seção 8). Opção
-                 `shutdown_after_scheduled_run` (AppConfig, padrão desligada; campo novo nas
-                 Configurações -- a janela fixa 820x590 pode precisar crescer). Gancho em
-                 `main.py::run_auto_update` DEPOIS de `run_update` retornar (navegador, IA e trava
-                 já liberados); não desliga se a execução nem começou (não configurado / outra em
-                 andamento). `shutdown /s /t 180` + janela de contagem regressiva com "Cancelar
-                 desligamento" (`shutdown /a`); recusa por política do Windows vira linha no log e
-                 no diagnóstico. Só a execução agendada (a manual nunca desliga). Testes: unit com
-                 o comando simulado (teste nunca desliga de verdade). Validação real: PC de
-                 produção, com o usuário presente. Pergunta 1 do DEC-129.
+[x] UI-009       Fase 1 -- "Ampliar" na tabela de pacientes (seção 9), como no censo por unidade.
+                 IMPLEMENTADO 2026-10-13. `main_window.py`: `_make_census_tree`/`_fill_census_tree`/
+                 `_filter_census_rows`/`_sorted_census_rows` (antes tudo amarrado a
+                 `self._census_tree`); `_open_census_window` abre uma Toplevel reaproveitada, com
+                 filtro e ordenação PRÓPRIOS (não mexem na tabela da tela principal) e duplo-clique
+                 abrindo o relatório; redesenhada a cada `_refresh_dashboard`. Achado da revisão:
+                 janela minimizada não voltava com `lift` -> `deiconify` antes (vale também pro
+                 "Ampliar" do censo por unidade). Testes: Tk (abre, reaproveita, restaura
+                 minimizada, filtro independente, ordena, duplo-clique, segue o refresh, janela
+                 fechada não quebra a dashboard).
+[x] UI-010       Fase 1 -- "EDD vencida (data provável de alta)" (seção 9). IMPLEMENTADO
+                 2026-10-13. Constantes únicas em `dashboard_metrics.py` (`EDD_PLAIN_NAME`,
+                 `EDD_OVERDUE_LABEL`, `EDD_MISSING_LABEL`) usadas pelo relatório e pela dashboard;
+                 na dashboard, cartão e faixa em duas linhas (numa linha só a faixa invadia os
+                 vizinhos em 1024 px, visto na prévia com dados fictícios); coluna da tabela
+                 "EDD (prev. alta)". Testes: relatório + dashboard.
+[x] SCHEDULE-002 Fase 1 -- "Desligar o computador ao finalizar a atualização" (seção 8).
+                 IMPLEMENTADO 2026-10-13 (DEC-129, adendo da Fase 1). `AppConfig.
+                 shutdown_after_scheduled_run` (padrão False), interruptor nas Configurações
+                 (janela 820x660), aviso na barra lateral da tela principal quando ligada.
+                 `app/shutdown.py` + `app/ui/shutdown_window.py`, chamados por
+                 `main.py::run_auto_update` só depois de uma execução que rodou (sucesso ou
+                 falha), relendo a opção do disco. Não desliga se: opção desligada; teclado/mouse
+                 usados nos últimos 10 min; outra sessão do Windows na frente da máquina; janela
+                 de aviso cancelada, fechada ou impossível de abrir; alguém mexeu durante a
+                 contagem. Só ao fim da contagem de 3 min no app roda `shutdown /s /t 0`, sem
+                 `/f` -- achado da revisão adversarial: `/t` maior que zero IMPLICA `/f` e
+                 fecharia à força programas com trabalho não salvo. Quando o PC fica ligado, o
+                 motivo vira uma frase na faixa de diagnóstico da tela principal
+                 (`Repository.annotate_latest_run_diagnostic`). Trava: o comando real é recusado
+                 dentro do pytest. Recusa do Windows com outra conta conectada (código 1191) é
+                 explicada como "outra sessão"; o interruptor do navegador passou a mudar só o
+                 próprio campo no disco (duas janelas abertas não religam a opção). Testes: +25
+                 (`test_shutdown.py`) +2 configuração +2 repositório +1 Configurações +3
+                 dashboard. PENDENTE: validação real no PC de
+                 produção, com o usuário presente (política do Windows do hospital, comportamento
+                 com tela bloqueada). Pergunta 1 do DEC-129 segue aberta (padrão adotado: só a
+                 atualização agendada, desliga mesmo após falha, aviso de 3 min).
 [ ] LLM-006      Fase 2 -- Fonte priorizada e síntese clínica v2 (seções 1, 2 e 6; casos 1, 4 e 5).
                  - `app/analysis/sources.py` (novo): cargo (`notes.source_type`) -> MEDICA /
                    ENFERMAGEM / MULTIPROFISSIONAL / NAO_IDENTIFICADA (valores espúrios como
