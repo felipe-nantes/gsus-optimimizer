@@ -101,15 +101,18 @@ KPI_ACCENTS = {
     "median_resolution": BRAND_COLOR,
 }
 
+# UI-010 (DEC-129): o nome em português da EDD vai na 2ª linha do cartão e
+# da faixa secundária -- numa linha só, não cabe em telas de 1024 px (a faixa
+# invadia os indicadores vizinhos, visto na prévia com dados fictícios).
 KPI_CARDS = [
     ("total_active", "Pacientes ativos"),
     ("with_pending", "Com pendência ativa"),
-    ("edd_overdue", "EDD vencida"),
+    ("edd_overdue", f"EDD vencida\n({dashboard_metrics.EDD_PLAIN_NAME})"),
     ("dia_vermelho", "Dia vermelho hoje"),
 ]
 
 KPI_SECONDARY = [
-    ("without_edd", "Sem EDD documentada"),
+    ("without_edd", f"Sem EDD documentada\n({dashboard_metrics.EDD_PLAIN_NAME})"),
     ("dia_verde", "Dia verde hoje"),
     ("median_resolution", "Tempo mediano de resolução"),
 ]
@@ -140,7 +143,7 @@ CENSUS_COLUMNS = [
     ("priority", "Prioridade", 100),
     ("pending_count", "Pendências", 80),
     ("time", "Tempo", 80),
-    ("edd", "EDD", 110),
+    ("edd", "EDD (prev. alta)", 125),
     ("dia", "Dia", 80),
 ]
 
@@ -279,6 +282,13 @@ class MainWindow:
         self._census_rows_all: list[PatientCensusRow] = []
         self._census_rows_visible: list[PatientCensusRow] = []
         self._census_sort_state: dict = {"column": None, "reverse": False}
+        # UI-009: janela ampliada do censo de pacientes -- filtro e ordenação
+        # próprios, independentes da tabela da tela principal.
+        self._census_window: tk.Toplevel | None = None
+        self._census_window_tree: ttk.Treeview | None = None
+        self._census_window_filter_var: tk.StringVar | None = None
+        self._census_window_count_label: tk.Label | None = None
+        self._census_window_sort_state: dict = {"column": None, "reverse": False}
         self._kpi_labels: dict[str, tk.Label] = {}
         self._refresh_job_id: str | None = None
 
@@ -378,10 +388,20 @@ class MainWindow:
             routine, text=self.app_config.schedule_time, font=(FONT_FAMILY, 18, "bold"),
             bg="#f7f8ef", fg=TEXT_PRIMARY,
         ).pack(anchor="w", padx=14)
+        shutdown_enabled = bool(self.app_config.shutdown_after_scheduled_run)
         tk.Label(
             routine, text=self.app_config.unit, font=(FONT_FAMILY, 8),
             bg="#f7f8ef", fg=TEXT_MUTED, wraplength=140, justify="left",
-        ).pack(anchor="w", padx=14, pady=(1, 13))
+        ).pack(anchor="w", padx=14, pady=(1, 4 if shutdown_enabled else 13))
+        # SCHEDULE-002: o auditor vê na tela principal que a opção está
+        # ligada, sem precisar abrir as Configurações.
+        self._shutdown_note = None
+        if shutdown_enabled:
+            self._shutdown_note = tk.Label(
+                routine, text="Desliga o computador ao terminar", font=(FONT_FAMILY, 8, "bold"),
+                bg="#f7f8ef", fg=TEXT_PRIMARY, wraplength=140, justify="left",
+            )
+            self._shutdown_note.pack(anchor="w", padx=14, pady=(0, 13))
 
     def _sidebar_item(
         self,
@@ -482,7 +502,13 @@ class MainWindow:
     def _on_browser_mode_toggle(self, visible: bool) -> None:
         self.app_config.browser_visible = bool(visible)
         try:
-            config.save_config(self.app_config)
+            # Achado da revisão (SCHEDULE-002): relê do disco e muda SÓ este
+            # campo. Com duas janelas do programa abertas, salvar a cópia
+            # inteira da memória religaria uma opção que a outra janela
+            # desligou -- ex.: "desligar o computador ao terminar".
+            on_disk = config.load_config() if config.get_config_path().exists() else self.app_config
+            on_disk.browser_visible = self.app_config.browser_visible
+            config.save_config(on_disk)
         except OSError:
             logger.exception("Falha ao salvar a preferência navegador visível/segundo plano")
         self._browser_mode_label.config(text=self._browser_mode_text())
@@ -559,7 +585,7 @@ class MainWindow:
             top = tk.Frame(body, bg=CARD_BG)
             top.pack(fill="x")
             tk.Label(
-                top, text=title, font=(FONT_FAMILY, 9), fg=TEXT_PRIMARY, bg=CARD_BG,
+                top, text=title, font=(FONT_FAMILY, 9), fg=TEXT_PRIMARY, bg=CARD_BG, justify="left",
             ).pack(side="left")
             icon_badge(
                 top, "arrow", size=26, color=KPI_ACCENTS.get(key, TEXT_PRIMARY),
@@ -590,7 +616,7 @@ class MainWindow:
             )
             value_label.pack(side="left")
             tk.Label(
-                item, text=title, font=(FONT_FAMILY, 9), fg=TEXT_MUTED, bg=CARD_BG,
+                item, text=title, font=(FONT_FAMILY, 9), fg=TEXT_MUTED, bg=CARD_BG, justify="left",
             ).pack(side="left", padx=(8, 0))
             if i < len(KPI_SECONDARY) - 1:
                 tk.Frame(secondary, bg=CARD_BORDER, width=1).grid(row=0, column=i, sticky="nse", pady=8)
@@ -731,6 +757,7 @@ class MainWindow:
         própria (a mesma janela é reaproveitada enquanto estiver aberta)."""
         if self._unit_window is not None and self._unit_window.winfo_exists():
             self._fill_unit_tree(self._unit_window_tree, self._unit_census_rows)
+            self._unit_window.deiconify()  # minimizada: `lift` sozinho não traz de volta
             self._unit_window.lift()
             return
         window = tk.Toplevel(self.root)
@@ -782,24 +809,14 @@ class MainWindow:
         self._census_filter_var = tk.StringVar()
         self._census_filter_var.trace_add("write", lambda *_args: self._apply_census_filter())
         ttk.Entry(filter_row, textvariable=self._census_filter_var, width=28).pack(side="left", padx=(8, 0))
+        # UI-009 (pedido do auditor, DEC-129): mesmo "Ampliar" do censo por unidade.
+        self._census_expand_button = ttk.Button(table_heading, text="Ampliar", command=self._open_census_window)
+        self._census_expand_button.grid(row=0, column=3, sticky="e", padx=(10, 0))
 
-        columns = [col_id for col_id, _label, _width in CENSUS_COLUMNS]
         # Quatro linhas visíveis mantêm a tabela útil sem roubar a altura
-        # dos gráficos em telas de notebook; a rolagem preserva o acesso ao
-        # censo completo.
-        self._census_tree = ttk.Treeview(
-            frame, columns=columns, show="headings", selectmode="browse", height=4,
-        )
-        for col_id, label, width in CENSUS_COLUMNS:
-            self._census_tree.heading(col_id, text=label, command=lambda c=col_id: self._sort_census_by(c))
-            self._census_tree.column(col_id, width=width, anchor="w")
-        for priority, color in PRIORITY_COLORS.items():
-            self._census_tree.tag_configure(priority, foreground=color)
-        # Listras alternadas (design/UX, 2026-09-03) -- linha de fundo só,
-        # combinada com a tag de prioridade (cor do texto) no mesmo item;
-        # tags diferentes controlam propriedades diferentes sem conflito.
-        self._census_tree.tag_configure("oddrow", background=CARD_BG)
-        self._census_tree.tag_configure("evenrow", background=SURFACE_SUBTLE)
+        # dos gráficos em telas de notebook; a rolagem e o "Ampliar"
+        # preservam o acesso ao censo completo.
+        self._census_tree = self._make_census_tree(frame, height=4, on_sort=self._sort_census_by)
         self._census_tree.grid(row=1, column=0, sticky="nsew", padx=(12, 0), pady=(0, 10))
 
         vscroll = ttk.Scrollbar(frame, orient="vertical", command=self._census_tree.yview)
@@ -820,6 +837,109 @@ class MainWindow:
         )
 
         self._census_tree.bind("<Double-1>", lambda _event: self._on_census_row_open())
+
+    def _make_census_tree(self, parent, height: int, on_sort: Callable[[str], None]) -> ttk.Treeview:
+        """Tabela de censo por paciente -- a mesma montagem na tela principal
+        e na janela ampliada (UI-009), cada uma com sua ordenação."""
+        columns = [col_id for col_id, _label, _width in CENSUS_COLUMNS]
+        tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse", height=height)
+        for col_id, label, width in CENSUS_COLUMNS:
+            tree.heading(col_id, text=label, command=lambda c=col_id: on_sort(c))
+            tree.column(col_id, width=width, anchor="w")
+        for priority, color in PRIORITY_COLORS.items():
+            tree.tag_configure(priority, foreground=color)
+        # Listras alternadas (design/UX, 2026-09-03) -- linha de fundo só,
+        # combinada com a tag de prioridade (cor do texto) no mesmo item;
+        # tags diferentes controlam propriedades diferentes sem conflito.
+        tree.tag_configure("oddrow", background=CARD_BG)
+        tree.tag_configure("evenrow", background=SURFACE_SUBTLE)
+        return tree
+
+    def _open_census_window(self) -> None:
+        """UI-009 (pedido do auditor, DEC-129): o censo de pacientes inteiro
+        numa janela própria, como o "Ampliar" do censo por unidade --
+        reaproveitada enquanto aberta e redesenhada a cada atualização da
+        dashboard. Filtro, ordenação e duplo-clique funcionam igual à tabela
+        da tela principal."""
+        if self._census_window is not None and self._census_window.winfo_exists():
+            self._render_census_window()
+            self._census_window.deiconify()  # minimizada: `lift` sozinho não traz de volta
+            self._census_window.lift()
+            return
+        window = tk.Toplevel(self.root)
+        window.title("Censo de pacientes")
+        window.configure(bg=BG_COLOR)
+        window.geometry("1200x640")
+        window.grid_columnconfigure(0, weight=1)
+        window.grid_rowconfigure(1, weight=1)
+
+        header = tk.Frame(window, bg=BG_COLOR)
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=18, pady=(16, 10))
+        header.grid_columnconfigure(1, weight=1)
+        title_box = tk.Frame(header, bg=BG_COLOR)
+        title_box.grid(row=0, column=0, sticky="w")
+        tk.Label(
+            title_box, text="Censo de pacientes", font=(FONT_FAMILY, 14, "bold"), fg=TEXT_PRIMARY, bg=BG_COLOR,
+        ).pack(side="left")
+        count_label = tk.Label(title_box, text="", font=(FONT_FAMILY, 9), fg=TEXT_MUTED, bg=BG_COLOR)
+        count_label.pack(side="left", padx=(8, 0))
+        tk.Label(
+            header, text="Clique duas vezes em uma linha para abrir o relatório individual",
+            font=(FONT_FAMILY, 8), fg=TEXT_MUTED, bg=BG_COLOR,
+        ).grid(row=0, column=1, sticky="w", padx=(14, 8))
+        filter_box = tk.Frame(header, bg=BG_COLOR)
+        filter_box.grid(row=0, column=2, sticky="e")
+        tk.Label(
+            filter_box, text="BUSCAR", font=(FONT_FAMILY, 8, "bold"), bg=BG_COLOR, fg=TEXT_MUTED,
+        ).pack(side="left")
+        filter_var = tk.StringVar(master=window)
+        filter_var.trace_add("write", lambda *_args: self._render_census_window())
+        ttk.Entry(filter_box, textvariable=filter_var, width=32).pack(side="left", padx=(8, 0))
+
+        tree = self._make_census_tree(window, height=18, on_sort=self._sort_census_window_by)
+        tree.grid(row=1, column=0, sticky="nsew", padx=(18, 0))
+        vscroll = ttk.Scrollbar(window, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vscroll.set)
+        vscroll.grid(row=1, column=1, sticky="ns", padx=(0, 18))
+        hscroll = ttk.Scrollbar(window, orient="horizontal", command=tree.xview)
+        tree.configure(xscrollcommand=hscroll.set)
+        hscroll.grid(row=2, column=0, sticky="ew", padx=(18, 0), pady=(0, 16))
+        tree.bind("<Double-1>", lambda _event: self._on_census_window_row_open())
+
+        self._census_window = window
+        self._census_window_tree = tree
+        self._census_window_filter_var = filter_var
+        self._census_window_count_label = count_label
+        self._census_window_sort_state = {"column": None, "reverse": False}
+        self._render_census_window()
+
+    def _census_window_alive(self) -> bool:
+        try:
+            return self._census_window is not None and bool(self._census_window.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _render_census_window(self) -> None:
+        if not self._census_window_alive():
+            return
+        rows = self._sorted_census_rows(
+            self._filter_census_rows(self._census_window_filter_var.get()), self._census_window_sort_state,
+        )
+        self._fill_census_tree(self._census_window_tree, rows)
+        self._census_window_count_label.config(text=self._census_count_text(len(rows), len(self._census_rows_all)))
+
+    def _sort_census_window_by(self, column: str) -> None:
+        state = self._census_window_sort_state
+        reverse = state["column"] == column and not state["reverse"]
+        self._census_window_sort_state = {"column": column, "reverse": reverse}
+        self._render_census_window()
+
+    def _on_census_window_row_open(self) -> None:
+        if not self._census_window_alive():
+            return
+        selection = self._census_window_tree.selection()
+        if selection:
+            self._open_patient_report(selection[0])
 
     # ------------------------------------------------------------- update
     def _on_update(self) -> None:
@@ -1159,20 +1279,36 @@ class MainWindow:
             self._fill_unit_tree(self._unit_window_tree, unit_census)
 
     # ------------------------------------------------------- tabela censo
-    def _apply_census_filter(self) -> None:
-        term = self._census_filter_var.get().strip().lower()
+    def _filter_census_rows(self, term: str) -> list[PatientCensusRow]:
+        term = term.strip().lower()
         if not term:
-            self._census_rows_visible = list(self._census_rows_all)
-        else:
-            self._census_rows_visible = [
-                row for row in self._census_rows_all
-                if term in row.bed.lower()
-                or term in row.record_number.lower()
-                or term in row.unit.lower()
-                or (row.main_category or "").lower().find(term) != -1
-                or (row.main_description or "").lower().find(term) != -1
-            ]
+            return list(self._census_rows_all)
+        return [
+            row for row in self._census_rows_all
+            if term in row.bed.lower()
+            or term in row.record_number.lower()
+            or term in row.unit.lower()
+            or (row.main_category or "").lower().find(term) != -1
+            or (row.main_description or "").lower().find(term) != -1
+        ]
+
+    def _sorted_census_rows(self, rows: list[PatientCensusRow], sort_state: dict) -> list[PatientCensusRow]:
+        rows = list(rows)
+        column = sort_state["column"]
+        if column is not None:
+            rows.sort(key=lambda r: self._census_sort_key(r, column), reverse=sort_state["reverse"])
+        return rows
+
+    @staticmethod
+    def _census_count_text(visible: int, total: int) -> str:
+        if visible == total:
+            return f"{total} paciente" if total == 1 else f"{total} pacientes"
+        return f"{visible} de {total} pacientes"
+
+    def _apply_census_filter(self) -> None:
+        self._census_rows_visible = self._filter_census_rows(self._census_filter_var.get())
         self._render_census_tree()
+        self._render_census_window()
 
     def _sort_census_by(self, column: str) -> None:
         reverse = self._census_sort_state["column"] == column and not self._census_sort_state["reverse"]
@@ -1207,12 +1343,19 @@ class MainWindow:
         return ""
 
     def _render_census_tree(self) -> None:
-        rows = list(self._census_rows_visible)
-        column = self._census_sort_state["column"]
-        if column is not None:
-            rows.sort(key=lambda r: self._census_sort_key(r, column), reverse=self._census_sort_state["reverse"])
+        rows = self._sorted_census_rows(self._census_rows_visible, self._census_sort_state)
+        self._fill_census_tree(self._census_tree, rows)
 
-        self._census_tree.delete(*self._census_tree.get_children())
+        visible = len(rows)
+        self._census_count_label.config(text=self._census_count_text(visible, len(self._census_rows_all)))
+        if visible:
+            self._census_empty_label.place_forget()
+        else:
+            self._census_empty_label.place(relx=0.5, rely=0.66, anchor="center")
+
+    @staticmethod
+    def _fill_census_tree(tree: ttk.Treeview, rows: list[PatientCensusRow]) -> None:
+        tree.delete(*tree.get_children())
         for i, row in enumerate(rows):
             context = row.clinical_context or ""
             context_short = (context[:CONTEXT_MAX_CHARS] + "…") if len(context) > CONTEXT_MAX_CHARS else context
@@ -1231,19 +1374,7 @@ class MainWindow:
                 row.dia_classificacao or ("—" if row.analyzed else AWAITING_AI_TEXT),
             )
             stripe = "evenrow" if i % 2 == 0 else "oddrow"
-            self._census_tree.insert("", "end", iid=row.record_number, values=values, tags=(row.main_priority, stripe))
-
-        total = len(self._census_rows_all)
-        visible = len(rows)
-        if visible == total:
-            count_text = f"{total} paciente" if total == 1 else f"{total} pacientes"
-        else:
-            count_text = f"{visible} de {total} pacientes"
-        self._census_count_label.config(text=count_text)
-        if visible:
-            self._census_empty_label.place_forget()
-        else:
-            self._census_empty_label.place(relx=0.5, rely=0.66, anchor="center")
+            tree.insert("", "end", iid=row.record_number, values=values, tags=(row.main_priority, stripe))
 
     def _on_census_row_open(self) -> None:
         selection = self._census_tree.selection()

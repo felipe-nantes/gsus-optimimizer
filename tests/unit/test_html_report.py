@@ -330,7 +330,9 @@ def test_report_includes_service_indicators_section(tmp_path):
     assert '<div class="indicators">' in content
     assert "Indicadores do serviço" in content
     assert "Com pendência ativa" in content
-    assert "Sem EDD documentada" in content
+    assert "Sem EDD documentada (data provável de alta)" in content
+    # UI-010 (pedido do auditor, DEC-129): sigla com o nome em português.
+    assert "EDD vencida (data provável de alta)" in content
     assert "Tempo mediano de resolução" in content
     assert "DIAGNOSTICO" in content
     assert "PROCEDIMENTO_CIRURGIA" in content

@@ -331,6 +331,149 @@ def test_unit_census_card_shows_table_and_expands_into_its_own_window(tmp_path, 
         root.destroy()
 
 
+# ------------------------------------------- Fase 1 dos ajustes do auditor (DEC-129)
+
+def _all_label_texts(widget) -> list[str]:
+    texts = []
+    for child in widget.winfo_children():
+        if isinstance(child, tk.Label):
+            texts.append(child.cget("text"))
+        texts.extend(_all_label_texts(child))
+    return texts
+
+
+def test_patient_census_expands_into_its_own_window_with_independent_filter(tmp_path, monkeypatch):
+    """UI-009 (seção 9 do auditor): "Ampliar" no censo de pacientes, como no
+    censo por unidade -- janela própria, reaproveitada, com filtro e
+    ordenação que não mexem na tabela da tela principal."""
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path / "GSUSAuditoria"))
+    _seed_two_patients()
+
+    root = tk.Tk()
+    try:
+        window = MainWindow(root, config.AppConfig(configured=True, unit="2A"))
+        window._census_expand_button.invoke()
+        root.update()
+
+        assert window._census_window.winfo_exists()
+        assert set(window._census_window_tree.get_children()) == {"100", "200"}
+        assert window._census_window_count_label["text"] == "2 pacientes"
+        first_window = window._census_window
+        window._open_census_window()  # segunda chamada: mesma janela
+        assert window._census_window is first_window
+
+        # Achado da revisão: minimizada, `lift` sozinho não trazia de volta.
+        window._census_window.iconify()
+        root.update()
+        window._open_census_window()
+        root.update()
+        assert window._census_window.state() == "normal"
+
+        window._census_window_filter_var.set("2B")
+        assert window._census_window_tree.get_children() == ("200",)
+        assert window._census_window_count_label["text"] == "1 de 2 pacientes"
+        assert len(window._census_tree.get_children()) == 2  # tela principal intacta
+
+        window._census_window_filter_var.set("")
+        window._sort_census_window_by("pending_count")
+        assert window._census_window_tree.get_children() == ("200", "100")
+    finally:
+        root.destroy()
+
+
+def test_expanded_census_opens_report_and_follows_dashboard_refresh(tmp_path, monkeypatch):
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path / "GSUSAuditoria"))
+    _seed_two_patients()
+    opened = []
+    monkeypatch.setattr("webbrowser.open", lambda uri: opened.append(uri))
+
+    root = tk.Tk()
+    try:
+        window = MainWindow(root, config.AppConfig(configured=True, unit="2A"))
+        window._open_census_window()
+        window._census_window_tree.selection_set("100")
+        window._on_census_window_row_open()
+        assert len(opened) == 1
+        assert "LEITO 1A" in window._census_report_path.read_text(encoding="utf-8")
+
+        conn = database.init_db(config.get_db_path())
+        Repository(conn).upsert_patient(Patient(record_number="300", bed="3C", unit="2A"))
+        conn.close()
+        window._refresh_dashboard()
+        assert "300" in window._census_window_tree.get_children()
+
+        window._census_window.destroy()
+        window._refresh_dashboard()  # janela fechada: não pode quebrar a dashboard
+        assert len(window._census_tree.get_children()) == 3
+    finally:
+        root.destroy()
+
+
+def test_edd_labels_carry_the_portuguese_name(tmp_path, monkeypatch):
+    """UI-010 (seção 9 do auditor): "EDD vencida" ganha "(data provável de
+    alta)"; o mesmo vale pros outros rótulos de EDD da tela."""
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path / "GSUSAuditoria"))
+
+    root = tk.Tk()
+    try:
+        window = MainWindow(root, config.AppConfig(configured=True, unit="2A"))
+        texts = _all_label_texts(root)
+        assert "EDD vencida\n(data provável de alta)" in texts
+        assert "Sem EDD documentada\n(data provável de alta)" in texts
+        assert window._census_tree.heading("edd", "text") == "EDD (prev. alta)"
+    finally:
+        root.destroy()
+
+
+def test_browser_toggle_never_reverts_options_saved_by_another_window(tmp_path, monkeypatch):
+    """Achado da 2ª revisão (SCHEDULE-002): com duas janelas do programa
+    abertas, o interruptor do navegador salvava a configuração INTEIRA da
+    memória -- religando o "desligar ao terminar" que a outra janela tinha
+    acabado de desligar. Agora muda só o próprio campo no disco."""
+    from app.security import credentials
+
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path / "GSUSAuditoria"))
+    monkeypatch.setattr(credentials, "get_credential", lambda name: None)
+    cfg = config.AppConfig(configured=True, unit="2A", shutdown_after_scheduled_run=True)
+    config.save_config(cfg)
+
+    root = tk.Tk()
+    try:
+        window = MainWindow(root, cfg)
+        other_window_cfg = config.load_config()
+        other_window_cfg.shutdown_after_scheduled_run = False  # a outra janela desliga a opção
+        config.save_config(other_window_cfg)
+
+        window.browser_switch.toggle()  # nesta janela, só o modo do navegador
+
+        on_disk = config.load_config()
+        assert on_disk.browser_visible is False
+        assert on_disk.shutdown_after_scheduled_run is False
+        assert on_disk.configured is True
+    finally:
+        root.destroy()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_sidebar_tells_when_the_pc_will_shut_down_after_the_update(tmp_path, monkeypatch, enabled):
+    """SCHEDULE-002: com a opção ligada, a tela principal avisa -- o auditor
+    não precisa abrir as Configurações pra saber se o PC vai desligar."""
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path / "GSUSAuditoria"))
+
+    root = tk.Tk()
+    try:
+        window = MainWindow(
+            root, config.AppConfig(configured=True, unit="2A", shutdown_after_scheduled_run=enabled),
+        )
+        if enabled:
+            assert window._shutdown_note["text"] == "Desliga o computador ao terminar"
+        else:
+            assert window._shutdown_note is None
+            assert "Desliga o computador ao terminar" not in _all_label_texts(root)
+    finally:
+        root.destroy()
+
+
 def test_census_tree_says_awaiting_ai_instead_of_a_dash_for_unanalyzed_patient(tmp_path, monkeypatch):
     """UI-008: o pagador perguntou o que era o traço no painel -- paciente
     que a IA ainda não analisou agora diz "Aguardando análise de IA";

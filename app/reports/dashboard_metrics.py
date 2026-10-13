@@ -42,6 +42,14 @@ from app.storage.repository import Repository
 # pro mesmo conceito.
 PRIORITY_RANK = {PRIORITY_ALTA: 3, PRIORITY_MEDIA: 2, PRIORITY_MONITORAMENTO: 1}
 
+# UI-010 (pedido do auditor, DEC-129): "EDD" é sigla do método (Estimated
+# Date of Discharge) que o auditor não usa no dia a dia -- todo rótulo de
+# indicador de EDD leva o nome em português. Um lugar só, pra dashboard e
+# relatório nunca divergirem.
+EDD_PLAIN_NAME = "data provável de alta"
+EDD_OVERDUE_LABEL = f"EDD vencida ({EDD_PLAIN_NAME})"
+EDD_MISSING_LABEL = f"Sem EDD documentada ({EDD_PLAIN_NAME})"
+
 
 @dataclass
 class ServiceIndicators:

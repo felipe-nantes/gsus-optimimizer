@@ -487,8 +487,8 @@ def _render_service_indicators(
     pct = indicators
     summary = f"""<div class="summary">
   <div class="stat"><span class="n">{pct.pct_patients_with_active_pending}%</span>Com pendência ativa</div>
-  <div class="stat"><span class="n">{pct.pct_patients_without_edd}%</span>Sem EDD documentada</div>
-  <div class="stat"><span class="n">{pct.pct_patients_with_edd_overdue}%</span>EDD vencida</div>
+  <div class="stat"><span class="n">{pct.pct_patients_without_edd}%</span>{dashboard_metrics.EDD_MISSING_LABEL}</div>
+  <div class="stat"><span class="n">{pct.pct_patients_with_edd_overdue}%</span>{dashboard_metrics.EDD_OVERDUE_LABEL}</div>
   <div class="stat compact"><span class="n">{_format_median_hours(pct.median_resolution_hours)}</span>Tempo mediano de resolução<small>horas entre o registro da pendência pela auditoria e sua resolução nas evoluções</small></div>
   <div class="stat dia-vermelho"><span class="n">{pct.patients_dia_vermelho}</span>Dia vermelho hoje</div>
   <div class="stat dia-verde"><span class="n">{pct.patients_dia_verde}</span>Dia verde hoje</div>
