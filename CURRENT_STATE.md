@@ -1359,3 +1359,40 @@ Proxima task: design/UX da tela (pedido explicito anterior do usuario) apos a en
 **Instalação 1.5.0 (12:54):** setup 120,0 MB, SHA-256 `7981DFB6BB867EA55DD288DC3E3E4A69F982F09EE30E49498011807D54ECBF5A`; exe instalado idêntico ao dist (`92810828D8C6E628C6D122A30CFFD65B5E8C1B9178F27718DE30ED7D2086BB57`), versão 1.5.0 no registro, modelo/runtime/Firefox preservados. Ensaio prévio da migração numa cópia do banco real: colunas novas OK, 10 runs RUNNING -> INTERRUPTED, 116 pacientes a resgatar pra IA (31 nunca analisados + 85 com evolução após a última análise).
 
 **Validação real do 1.5.0 (auditoria lançada 12:54, run `fd74a9fb`, headless):** run `fd74a9fb` (12:56-14:05): RESIL-016 confirmado (9 runs -> INTERRUPTED no início), RESIL-015 confirmado (2 admissões de 08/09 viraram AWAITING_NOTES -- os mesmos pacientes que falhavam de manhã), 25 evoluções de hoje aos 20 pacientes, 0 falhas até o paciente 167 (164/174 concluídos, 1 sem internação). Achados: (a) paciente com 80 dias na internação atual (2,8 MB) perdeu 26 dias após um clique falhar no dia 54 -- dias não gravados são reabertos sozinhos na próxima execução; (b) no fim do censo (~170 prontuários) o menu de busca parou de responder, o relogin do DEC-117 na MESMA sessão falhou de novo ("pop-up não abriu", 8 de 8 no dia) e o disjuntor fechou a execução com 6 seguidos (FAILED/ABORTED_GSUS), sem resgate de IA -> RESIL-019/DEC-127 (relogin em contexto novo), instalador 1.5.1; (c) IA: 41 análises antes do abort, 0 EDD inferida com a regex 1.5.0 -- a medição real mostrou que a forma dominante era `previsão de alta: dia dd/mm/aa` (adendo DEC-126). A sessão de desenvolvimento caiu às ~14:06 e zerou a ref da branch, o índice do worktree e o CURRENT_STATE.md do working tree (NTFS após queda abrupta); recuperados em 09/09 pelo reflog (SHA 3bc8c51) e pelo commit -- objetos íntegros, 21 commits à frente de main. Execução agendada de 00:01 (09/09) falhou no login (GSUS não respondeu, FALHA_GSUS). 1.5.1 instalado em 09/09 (setup SHA-256 `BBA920D17B1301156079DA8E856A39186F5C9C31BC0B760235CE0BBA0213F83F`, exe `F5CFE90B...D35E` idêntico ao dist).
+
+---
+
+## 2026-10-13 — Retomada após um mês: sincronização com o GitHub, testes consertados e plano dos ajustes do auditor (DEC-129)
+
+**Pedido do usuário:** ficar pronto para alterar a versão mais recente conforme o que o auditor pediu depois de usar o 1.5.1. Em seguida, planejar, sem mudar código, a execução dos ajustes descritos em dois documentos do auditor.
+
+**Método:**
+- **Sincronização.** Este checkout estava 29 commits atrás de um `origin/main` reescrito (histórico sem trailers). Foi criado o backup local `backup/local-pre-sync-2026-10-13`, seguido de reset para `origin/main` (05c8e5b: 1.5.1 + BUNDLE-001).
+- **Suíte.** Em HEAD havia 7 falhas em `test_main_window_update.py`: os dublês não tinham `timeout_ms` nem aceitavam `context_timeout_ms` desde o RESIL-019. A correção foi só no teste (commit 1a5aea4, sem trailer, enviado ao GitHub). Resultado: 489 aprovados; na integração, 24 aprovados mais os 10 erros conhecidos de Chromium.
+- **Topologia.** A produção roda em OUTRO PC, com o 1.5.1 instalado em 09/09. Esta máquina é de desenvolvimento:
+  - a instalação e o banco estão parados em 03/09;
+  - a tarefa agendada é a antiga, sem `--auto-update` (DEC-079);
+  - não houve nenhum login no GSUS a partir daqui desde 03/09.
+- **Planejamento.**
+  - PDFs lidos; os prints do prontuário real não foram abertos.
+  - Código auditado em 4 frentes paralelas.
+  - Medição só agregada (contagens), somente leitura, no banco de dev.
+
+**Achados principais (detalhe no DEC-129):**
+- A pendência de interconsulta casa só pela categoria.
+- A "evolução mais recente" é escolhida só pela hora, sem olhar o cargo, então enfermagem vence a evolução médica.
+- A regra de interconsulta só fecha dentro da mesma janela de extração.
+- O cargo do autor e as linhas "PELA <esp>" já são capturados e não são usados. Das 27 interconsultas ativas com especialidade reconhecível, 15 já tinham evolução posterior da especialidade.
+- A unidade do censo não entra no prompt.
+- Não existe nenhuma faixa de sinal vital no código.
+- O relatório é estático, então a confirmação manual tem de ficar no aplicativo.
+- A "previsão de alta" fica no campo "Diagnóstico Descritivo" da evolução médica.
+
+**Resultado:** nenhuma mudança no código do produto.
+- DEC-129 registrado com 7 fases e 6 perguntas ao auditor.
+- TASKS.md ganhou UI-009, UI-010, SCHEDULE-002, LLM-006, PEND-001, PEND-002, EDD-002, EDD-003, LOOKUP-001 e ACCEPT-001.
+
+**Próxima task:**
+1. Aprovação do plano pelo usuário.
+2. Envio das perguntas ao auditor.
+3. Fase 1: UI-009, UI-010 e SCHEDULE-002.

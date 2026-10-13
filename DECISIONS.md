@@ -2357,3 +2357,171 @@ Assimetria de risco deliberada: um falso positivo aqui (tratar um censo genuinam
 **Decisao:** installer/gsus-auditoria.iss ganha uma 2a variante, ativada por `/DBundleModel` na linha de comando do ISCC, que copia o .gguf ja validado (`ModelSourcePath`, fora do repositorio, mesmo tratamento de runtime/ e playwright-browsers/) direto pra `{app}\models\model.gguf` durante a instalacao -- `ensure_model_downloaded` (idempotente, so checa `model_path.exists()`) pula o download por completo. `nocompression` no arquivo do modelo (ja e dado quantizado, denso; lzma2 gastaria dezenas de minutos pra pouco ganho). A variante padrao (sem a flag) continua byte-a-byte igual a antes -- mesmo `.spec`, mesmo `dist/`, mesma logica de download. Saida: `GSUSAuditoria-Setup.exe` (~120MB, online) e `GSUSAuditoria-Setup-ComIA.exe` (~5GB, offline).
 
 **Verificacao:** os dois instaladores compilados e com hash registrado no build. **Impacto:** so `installer/gsus-auditoria.iss` -- nenhum codigo do app mudou.
+
+---
+
+## DEC-129 — Plano dos ajustes pedidos pelo auditor após usar o 1.5.1: síntese clínica, fonte priorizada, ciclo de vida das pendências, confirmação manual, EDD, desligamento e Localizar ao vivo
+
+**Pedido do usuário (2026-10-13):** dois documentos do auditor, os dois sobre a versão em uso desde 09/09 (1.5.1; "versão analisada 11/09/2026"):
+- "DÚVIDAS SOBRE PRODUTO — nova versão": 2 dúvidas e 6 prints do prontuário de uma paciente real.
+- "Ajustes solicitados no relatório de auditoria concorrente": 10 seções e 7 casos mínimos de aceitação.
+
+O usuário pediu um plano de execução no mesmo modelo do DEC-099, sem nenhuma mudança de código ("Ainda não realize nenhuma mudança, apenas planeje").
+
+**Método:**
+- Texto dos dois PDFs extraído com pypdf. Os 6 prints NÃO foram abertos: são do prontuário real, e o texto já descreve o padrão.
+- Auditoria do código em 4 frentes paralelas: contrato da IA; extração do GSUS e caminho de paciente único; armazenamento das pendências, relatório e dashboard; fluxo de atualização, desligamento e EDD.
+- Medição SÓ AGREGADA, somente leitura, no banco desta máquina de desenvolvimento (cópia parada em 03/09). Os números servem para dimensionar e não são os de produção. Nenhum texto de evolução, prontuário ou leito foi impresso.
+
+**Achados (o que explica cada queixa):**
+
+1. **"Paciente já avaliado pelas especialidades continua com pendência aberta".** Quatro causas se somam no código:
+   - Pendência de interconsulta da IA casa só pela CATEGORIA (`orchestrator.py::STAGE_PROGRESSION_CATEGORIES`, DEC-064). Duas interconsultas diferentes (ex.: infecto e reumato) viram uma só. A descrição original ("Aguarda avaliação…") fica congelada, e cada saída nova da IA só acrescenta evidência a ela.
+   - A IA recebe "PENDÊNCIAS AINDA ABERTAS (reavalie se continuam)", e a janela de 14 dias ainda contém o pedido original, então ela tende a reemitir. A única regra de fechamento é "sumiu da resposta = resolvida".
+   - A regra determinística de interconsulta só fecha se o pedido e um "parecer" citando a mesma frase caírem na MESMA janela de extração (dias novos + 2). Pedido de 3 dias atrás ou mais nunca fecha por regra. Além disso, regra e IA criam duplicatas uma da outra, e a evidência gravada pela regra é a nota inteira.
+   - O sinal de que "a especialidade avaliou" JÁ é capturado e não é usado. O cabeçalho real "dd/mm/aaaa hh:mm - nome (cargo)" vira `notes.source_type` ("Médico infectologista", "Médico nefrologista"…); o cargo está presente em cerca de 98,5% das 24.744 evoluções do banco de dev. "PELA <ESPECIALIDADE>" aparece no início de LINHA, nunca no início da evolução, porque o cabeçalho vem antes. Contagens: NEFROLOGIA 44, CIRURGIA 30, FARMÁCIA 25, ORTOPEDIA 9 etc.
+   - Dimensão no banco de dev: 403 pendências ativas contra 16 resolvidas em toda a história. Há 78 interconsultas ATIVAS:
+     - 27 delas citam uma especialidade reconhecível. Dessas, 15 (56%) já tinham evolução POSTERIOR da própria especialidade: 14 pelo cargo do autor e 6 por linha "PELA <esp>".
+     - As outras 51 nem dizem qual é a especialidade. Por isso o plano exige um "alvo" estruturado.
+2. **"Registro recente de enfermagem substitui a evolução médica".** Confirmado. O prompt manda usar a "EVOLUÇÃO MAIS RECENTE" para necessidade hospitalar, situação atual e classificação do dia, e essa evolução é escolhida só pela hora (`rules.py::most_recent_note`), qualquer que seja o cargo.
+   - Nada prioriza evolução médica: nem regra, nem orçamento de caracteres, nem prompt. O corte de 9.000 caracteres (`_limit_to_char_budget`) descarta as mais antigas primeiro, sejam médicas ou não.
+   - A IA vê "sem especialidade" em toda nota, porque `notes.specialty` é sempre nulo.
+   - `patient_state.especialidade_responsavel` é sempre NULL em produção, porque lê `last_note.specialty`.
+3. **Repetição entre campos e rotina de enfermagem no resumo.** O prompt não dá papéis distintos a contexto, necessidade, objetivo, próximo passo e classificação do dia (VERDE e VERMELHO nem são definidos). Não há lista de exclusão, e nada no código deduplica. O próprio relatório repete por construção: "Pendência principal" reaparece na lista, e o selo do dia reaparece na linha "Classificação".
+4. **"FR 18 classificada como baixa".** Não existe faixa de sinal vital em nenhum lugar do código; a frase veio do modelo.
+5. **"Leito de observação" para paciente na UTI.** A unidade e o leito do censo são gravados a cada execução, mas nunca entram no prompt; a IA deduz a localização de texto antigo.
+   - Unidades reais no banco de dev: "3 - Internados P.A.", "ENF. MEDICO-CIRURGICA 1/2/3", "Enfer. GO", "Enfer. GO-AC", "UTI Geral", "UTI Adulto", "UTI PED 1/2", "Neonatal - UTI", "Enf. Pediátrica". A grafia variou ao longo do tempo.
+6. **Confirmação manual.** Não existe.
+   - `pending_items.status` só tem ACTIVE e RESOLVED. Não há histórico por pendência nem registro de quem alterou, quando e por quê.
+   - O relatório HTML é estático (sem JavaScript nem servidor, que é não-escopo da spec), então a ação tem de ficar no aplicativo.
+   - A dashboard já relê o banco a cada 60 s. O relatório individual já é gerado só a partir do banco (`generate_patient_report`); o geral ainda depende de um run_id.
+7. **EDD na evolução médica.**
+   - `edd.py` procura em qualquer nota e no texto inteiro.
+   - "previsão de alta" aparece quase só em evolução médica. Das 217 ocorrências em notas médicas, 161 ficam até 300 caracteres depois do rótulo "Diagnóstico Descritivo". Esse é um campo do formulário, seguido de "Queixa Principal" em 80% das notas.
+   - Os marcadores PPC/PPN aparecem em 50 evoluções, todas em "Enfer. GO", e em nenhuma de "Enfer. GO-AC", onde ficam os recém-nascidos, cada um com prontuário próprio.
+   - Não há vínculo mãe–RN no modelo de dados. O censo NÃO lê "Nome da Mãe", de propósito, para minimizar dado.
+8. **Desligar o PC.** Nada existe. A execução agendada (`main.py::run_auto_update`) roda sem janela e só libera navegador, IA e trava quando `run_update` retorna; esse é o ponto seguro para encaixar o desligamento.
+9. **Ampliar a tabela de pacientes.** A tabela está amarrada a `self._census_tree` e precisa do mesmo refatoramento `_make/_fill` que o censo por unidade já tem.
+10. **Localizar ao vivo.** Contraria o RF-19 atual: o DEC-067 tirou o acesso ao vivo por causa da tela "Justificar Acesso ao Prontuário" (DEC-035).
+    - A busca direta por prontuário ainda existe (`records.open_current_admission`).
+    - Reusar `run_once` com 1 paciente seria perigoso: marcaria todos os outros como alta, rodaria o expurgo e sobrescreveria o relatório geral.
+    - Rodar em paralelo à execução noturna derrubaria o llama-server dela (`_kill_orphan_on_port`) e marcaria a execução como INTERRUPTED.
+    - Custo da IA neste hardware: carga de ~110 s, mais de 80 s a vários minutos por análise.
+
+**Decisões propostas (dependem da aprovação do plano):**
+
+1. **Fonte classificada pelo cargo, de forma determinística** (`app/analysis/sources.py`, novo). Categorias: MÉDICA (cargo "Médico …"), ENFERMAGEM, MULTIPROFISSIONAL e NÃO IDENTIFICADA (valor espúrio). Na prática:
+   - o cabeçalho que a IA vê passa a dizer a fonte;
+   - o marcador "mais recente" vai para a evolução MÉDICA mais recente;
+   - o orçamento de caracteres reserva as médicas primeiro;
+   - enfermagem e equipe multiprofissional entram como apoio para sinais e eventos objetivos (tabela da seção 2 do auditor).
+2. **Síntese v2 no prompt, com filtros determinísticos na exibição.**
+   - Papéis curtos e distintos por campo:
+     - contexto com 2 a 4 linhas, seguindo as listas "incluir/excluir" do auditor;
+     - justificativa da necessidade sem repetir o diagnóstico;
+     - objetivo diferente de próximo passo;
+     - VERDE e VERMELHO definidos.
+   - Localização atual do censo no prompt, como fonte de verdade.
+   - Faixas de referência de sinais vitais numa tabela parametrizável (`app/analysis/vital_ranges.py`). Proposta para adulto, enviada ao auditor em 2026-10-13: FR 12–20 irpm, FC 60–100 bpm, PA 90–139/60–89 mmHg, temperatura axilar 36,0–37,7 °C, SpO₂ ≥ 94% em ar ambiente, HGT 70–180 mg/dL. Paciente em O₂ ou suporte ventilatório e setores pediátricos, neonatais e de alojamento conjunto ficam sem qualificação automática.
+   - Na exibição, sem alterar o texto gravado da IA, o sistema remove: repetição entre campos; frase só de rotina sem complicação; qualificador de sinal vital que contradiz a faixa; menção a "observação" para paciente em UTI. Cada correção é contada no log.
+3. **Ciclo de vida de 5 estados**, os sugeridos pelo auditor, todos viáveis: Ativa, Em verificação pelo auditor, Concluída automaticamente, Concluída pelo auditor, Cancelada.
+   - Esquema aditivo: colunas de resolução em `pending_items` (origem da resolução, evidência e data, quem resolveu, "alvo" normalizado) e tabela nova `pending_item_events`, um histórico em que só se acrescenta.
+   - Contrato v2 da IA: cada pendência ganha `alvo` (especialidade, exame ou procedimento), e a IA devolve uma DECISÃO para cada pendência anterior (mantida, concluída, cancelada ou incerta, com evidência).
+     - "Sumiu da resposta" deixa de resolver.
+     - Decisão omitida mantém o estado.
+     - Decisão "incerta" leva a "Em verificação".
+   - Casamento entre execuções por (categoria, alvo), unificando regra e IA.
+4. **Detector determinístico de interconsulta realizada** (`app/analysis/specialty_evaluation.py`, novo).
+   - Fecha como "Concluída automaticamente", com a evidência e a data da evolução que provou a avaliação, quando encontra uma evolução posterior ao pedido que tenha:
+     - cargo correspondente à especialidade-alvo; ou
+     - linha "PELA <ESPECIALIDADE>", usando uma tabela de sinônimos (NEFRO→NEFROLOGIA, REUMATO→REUMATOLOGIA…) e ignorando "pela manhã/tarde/noite".
+   - Varre o histórico do paciente no banco, não só a janela, então pedidos antigos também fecham. Isso inclui uma passada única, na migração, sobre as pendências já ativas.
+   - Mesmo princípio para punção ("puncionado", "acesso obtido com sucesso") e para exame (laudo/resultado, mantendo a exclusão de "aguardando laudo").
+   - Pedido novo do especialista vira pendência nova e específica (regra do prompt).
+5. **Confirmação manual no aplicativo.** É o RF-30, que a spec já previa como "mecanismo futuro".
+   - Janela "Revisar pendências", aberta pela tabela de pacientes com botão ou menu de contexto. O duplo-clique continua abrindo o relatório.
+   - Ações: "Marcar como resolvida", "Reabrir" e, para itens em verificação, "Manter ativa". Justificativa opcional.
+   - O histórico registra o nome do auditor (vem das Configurações e é perguntado uma vez se estiver vazio), o usuário do Windows e a data/hora.
+   - A evidência original da IA nunca é alterada.
+   - Ao salvar, a dashboard é recalculada na hora, e os relatórios geral e individual são regerados a partir do banco.
+   - Proteções na análise seguinte:
+     - Pendência concluída pelo auditor não é recriada com evidência antiga. Só volta como item novo, com evidência posterior à decisão.
+     - Pendência reaberta pelo auditor só fecha com evidência posterior à reabertura.
+6. **EDD.**
+   - Inferência só em evolução médica: primeiro o campo "Diagnóstico Descritivo", depois o resto da nota.
+   - Padrão obstétrico de 48h para "Enfer. GO" com marcador PPC/PPN, e para o RN em "Enfer. GO-AC". A regra precisa ser confirmada com o auditor antes de virar código.
+   - Origem da data sempre visível ("documentada", "relativa", "padrão obstétrico 48h"), por meio da coluna nova `edd_origem`.
+   - O cálculo determinístico passa a rodar também na Fase 1, sem depender da IA.
+7. **Desligamento opcional, só ao fim da execução AGENDADA.**
+   - Opção nas Configurações, desligada por padrão.
+   - Acontece depois de navegador, IA e trava liberados, com janela de contagem regressiva e botão "Cancelar desligamento". Por baixo, é agendado com `shutdown /s /t` e cancelado com `shutdown /a`.
+   - Não desliga se a execução nem começou (outra em andamento, ou app não configurado).
+   - Consequência: o PC precisa ficar ligado quando o auditor sai à noite, porque o Agendador não liga um PC desligado.
+8. **UI.** "Ampliar" na tabela de pacientes, em janela própria, com filtro, ordenação e duplo-clique. Rótulo "EDD vencida (data provável de alta)" na dashboard e no relatório.
+9. **Localizar ao vivo.** Muda o RF-19, com decisão própria ao iniciar a fase.
+   - Fluxo novo, `update_flow.run_single_patient`, irmão de `run_update` e nunca `run_once`.
+   - Usa a mesma trava de instância: se houver atualização geral em curso, recusa com mensagem clara.
+   - Roda a Fase 1 antes de subir a IA.
+   - Mostra na hora o último relatório local e o troca pelo atualizado ao terminar.
+   - Não tem efeitos de censo.
+   - Paciente fora da internação atual recebe uma mensagem; o sistema nunca preenche a tela de justificativa (DEC-035).
+   - A execução agendada passa a esperar a trava (até 60 min), em vez de pular a noite.
+
+**Ordem de implementação proposta** (aprovação do usuário entre fases, como no DEC-099):
+- Fase 1 (rápidos e independentes): UI-009, UI-010 e SCHEDULE-002, com DIAG-002 (já planejado) de carona. Pode sair sozinha como 1.5.2.
+- Fase 2 (fonte e síntese): LLM-006 (casos 1, 4 e 5).
+- Fase 3 (ciclo de vida): PEND-001 (casos 2, 3 e parte do 6).
+- Fase 4 (confirmação manual): PEND-002 (casos 6 e 7).
+- Fase 5 (EDD): EDD-002 e EDD-003. Depende das respostas do auditor e pode subir de posição.
+- Fase 6 (Localizar ao vivo): LOOKUP-001.
+- Fase 7: release 1.6.0 e validação real dos 7 casos com o auditor (ACCEPT-001).
+
+**Perguntas ao auditor** (versão para envio montada em 2026-10-13: 21 perguntas em 6 blocos, sem sugestão de resposta, para não induzir o auditor; cada bloco precisa de resposta antes da fase indicada):
+1. Desligamento (Fase 1):
+   - 1a: só na atualização da madrugada?
+   - 1b: desliga mesmo depois de falha?
+   - 1c: tempo do aviso (padrão interno se não houver resposta: 3 min).
+2. Sinais vitais e rotina (Fase 2):
+   - 2a: faixas de adulto propostas.
+   - 2b: para paciente em O₂ ou suporte ventilatório e em pediatria, neonatal ou alojamento conjunto, só citar o valor.
+   - 2c: acréscimos à lista de rotina.
+3. Estados (Fase 3):
+   - 3a: os 5 estados.
+   - 3b: outras formas de a especialidade registrar a avaliação.
+   - 3c: dias em que uma pendência concluída fica visível (padrão interno se não houver resposta: 3).
+4. Confirmação manual (Fase 4):
+   - 4a: um auditor por PC ou vários.
+   - 4b: no tempo de resolução, vale a data da marcação ou a data real.
+5. EDD (Fase 5):
+   - 5a: só a evolução médica.
+   - 5b: unidades "Enfer. GO" e "Enfer. GO-AC".
+   - 5c: âncora na admissão ou no parto.
+   - 5d: prazo da cesárea.
+   - 5e: gestante sem PPC/PPN fica fora.
+   - 5f: RN com 48h da própria admissão ou com a data da mãe.
+   - 5g: EDD do médico vence o padrão.
+6. Localizar ao vivo (Fase 6):
+   - 6a: espera de alguns minutos.
+   - 6b: aviso durante a atualização geral.
+   - 6c: paciente internado depois da última atualização.
+
+**Riscos e cuidados:**
+- Prompt mais longo custa tempo de IA no hardware fraco (DEC-070). Por isso, cada fase de prompt mede o tempo por análise contra a linha de base.
+- Modelo de 8B pode omitir decisões no contrato v2. O fallback mantém o estado, e o detector e o auditor cobrem o resto.
+- A migração é ensaiada na cópia do banco desta máquina antes do build (prática do DEC-119).
+- Desligamento pode ser bloqueado por política do Windows do hospital; isso só se valida no local.
+- Localizar ao vivo noutra máquina usaria a mesma conta do GSUS da produção; por isso, só no PC de produção.
+
+**Fora do escopo:**
+- Qualquer escrita no GSUS.
+- Ler "Nome da Mãe" para vincular RN e mãe.
+- Ligar o PC automaticamente.
+
+**Testes:** nenhum nesta sessão (planejamento). Em cada fase:
+- testes unitários e E2E com fixtures sintéticas, em que os 7 casos de aceitação viram testes nomeados;
+- prévia visual com dados DEMO;
+- nas fases que mexem no prompt, rodada do modelo real sobre casos sintéticos nesta máquina (porta isolada, DEC-123), com aderência e tempo por análise comparados à linha de base (LLM-001: 80,6 s).
+
+**Impacto:** nenhuma mudança de código nesta sessão.
+- TASKS.md ganha UI-009, UI-010, SCHEDULE-002, LLM-006, PEND-001, PEND-002, EDD-002, EDD-003, LOOKUP-001 e ACCEPT-001.
+- PROJECT_SPEC.md só muda quando cada fase for aprovada (RF-19, RF-23, RF-27, RF-30 e um RF novo de desligamento).

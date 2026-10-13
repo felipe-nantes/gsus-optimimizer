@@ -806,6 +806,175 @@ Regra: enquanto houver P0 pendente, não iniciar P1. Cada task segue o ciclo REA
                  própria busca do GSUS, ainda não implementado)
 ```
 
+## Ajustes do auditor — versão analisada 11/09/2026 (PLANEJADO 2026-10-13, DEC-129)
+
+Fases, ordem e perguntas ao auditor no DEC-129; aprovação do usuário entre fases. "Seção N" =
+documento "Ajustes solicitados no relatório de auditoria concorrente"; "caso N" = os 7 casos
+mínimos de aceitação da seção 7 (cada um vira teste nomeado).
+
+```
+[ ] UI-009       Fase 1 -- "Ampliar" na tabela de pacientes (seção 9), como no censo por unidade.
+                 `main_window.py`: extrair `_make_census_tree`/`_fill_census_tree` de
+                 `_render_census_tree` (hoje amarrado a `self._census_tree`); Toplevel reaproveitada
+                 enquanto aberta (padrão `_open_unit_census_window`), com filtro, ordenação e
+                 duplo-clique abrindo o relatório; atualizada junto em `_refresh_dashboard`.
+                 Testes: Tk (abre, reaproveita, filtra, duplo-clique). Prévia: `scripts/preview_ui.py`.
+[ ] UI-010       Fase 1 -- "EDD vencida (data provável de alta)" (seção 9): cartão da dashboard
+                 (`main_window.py::KPI_CARDS`) e indicador do relatório (`html_report.py`); mesmo
+                 adendo em "Sem EDD documentada"; cabeçalho curto da coluna da tabela: "Prev. alta".
+                 Testes: relatório + dashboard (nenhum teste atual fixa o texto antigo).
+[ ] SCHEDULE-002 Fase 1 -- "Desligar o computador ao finalizar a atualização" (seção 8). Opção
+                 `shutdown_after_scheduled_run` (AppConfig, padrão desligada; campo novo nas
+                 Configurações -- a janela fixa 820x590 pode precisar crescer). Gancho em
+                 `main.py::run_auto_update` DEPOIS de `run_update` retornar (navegador, IA e trava
+                 já liberados); não desliga se a execução nem começou (não configurado / outra em
+                 andamento). `shutdown /s /t 180` + janela de contagem regressiva com "Cancelar
+                 desligamento" (`shutdown /a`); recusa por política do Windows vira linha no log e
+                 no diagnóstico. Só a execução agendada (a manual nunca desliga). Testes: unit com
+                 o comando simulado (teste nunca desliga de verdade). Validação real: PC de
+                 produção, com o usuário presente. Pergunta 1 do DEC-129.
+[ ] LLM-006      Fase 2 -- Fonte priorizada e síntese clínica v2 (seções 1, 2 e 6; casos 1, 4 e 5).
+                 - `app/analysis/sources.py` (novo): cargo (`notes.source_type`) -> MEDICA /
+                   ENFERMAGEM / MULTIPROFISSIONAL / NAO_IDENTIFICADA (valores espúrios como
+                   "Direita"/"Esquerda", ~1,5% no banco de dev, caem aqui). Tabela montada a
+                   partir dos ~40 cargos reais medidos.
+                 - Prompt (`llm.py::build_prompt`): cabeçalho com a fonte; marcador "MAIS RECENTE"
+                   na evolução MÉDICA mais recente (fallback: a mais recente de qualquer fonte);
+                   bloco "LOCALIZAÇÃO ATUAL (censo do GSUS, fonte de verdade)" com unidade, leito
+                   e DIH (`_run_llm_analysis` passa a receber o paciente).
+                 - Orçamento (`_limit_to_recent_window`/`_limit_to_char_budget`): médicas
+                   primeiro, depois as demais. Conferir a premissa de ordem cronológica das notas
+                   (achado em aberto: se o GSUS listar o dia mais novo primeiro, o corte descarta
+                   as novas).
+                 - System prompt v2: papéis curtos e distintos por campo; listas incluir/excluir
+                   da seção 1; definição de VERDE/VERMELHO; faixas de sinais vitais
+                   (`app/analysis/vital_ranges.py`, novo, parametrizável; faixas de adulto
+                   propostas ao auditor -- pergunta 2; O2/suporte ventilatório e setores
+                   pediátricos, neonatais e de alojamento conjunto sem qualificação automática);
+                   "não descreva localização diferente da do censo".
+                 - `app/analysis/clinical_filters.py` (novo), aplicado na EXIBIÇÃO (relatório e
+                   dashboard), nunca no texto gravado da IA: repetição entre campos (similaridade
+                   de tokens), frase só de rotina sem complicação (AVP, monitorização, "cuidados
+                   de enfermagem"), qualificador de sinal vital que contradiz a faixa,
+                   "observação" para paciente em UTI. Contadores por execução no log.
+                 - Relatório: sem a repetição de construção ("Pendência principal" destacada na
+                   própria lista; selo do dia sem a linha duplicada).
+                 - Bug: `especialidade_responsavel` sempre NULL (lê `specialty`, sempre nulo) --
+                   passa a vir do cargo da evolução médica mais recente.
+                 Testes: unit (fontes, orçamento, prompt com localização e marcador, filtros dos
+                 casos 1, 4 e 5, relatório sem repetição) + rodada do modelo real em casos
+                 sintéticos nesta máquina (porta isolada, DEC-123), aderência e tempo por análise
+                 contra LLM-001 (80,6 s). Sem migração de banco.
+[ ] PEND-001     Fase 3 -- Ciclo de vida das pendências (seções 3 e 4; casos 2, 3 e parte do 6).
+                 - Esquema aditivo (`database.py::_migrate`): `pending_items` + `alvo`,
+                   `resolution_source` (IA / REGRA / DETECTOR / AUDITOR / LEGADO),
+                   `resolution_evidence`, `resolution_evidence_date`, `resolved_by`; estados
+                   ACTIVE / IN_REVIEW / RESOLVED / CANCELLED (rótulos: Ativa, Em verificação pelo
+                   auditor, Concluída automaticamente, Concluída pelo auditor, Cancelada). Tabela
+                   nova `pending_item_events` (só acréscimo: quando, quem, de->para, evidência,
+                   justificativa). Migração idempotente, histórico inicial a partir de
+                   created_at/resolved_at; ensaiada antes na cópia do banco desta máquina.
+                 - Contrato v2 (`schemas.py`/`llm.py`): `alvo` por pendência; lista
+                   `revisao_pendencias` com uma decisão por pendência anterior (MANTIDA /
+                   CONCLUIDA / CANCELADA / INCERTA, com evidência e data). "Sumiu da resposta"
+                   deixa de resolver; decisão omitida mantém o estado; INCERTA -> IN_REVIEW.
+                   Pedido novo do especialista -> pendência nova e específica. Anotação de
+                   enfermagem sobre punção/contato/presença do serviço não abre pendência quando
+                   o atendimento já ocorreu.
+                 - Casamento por (categoria, alvo normalizado), regra e IA no mesmo conjunto --
+                   fim das duplicatas e do colapso de duas interconsultas numa só
+                   (`STAGE_PROGRESSION_CATEGORIES`).
+                 - `app/analysis/specialties.py` (novo): sinônimos de especialidade (cargo
+                   "Médico nefrologista", "PELA NEFRO", "nefrologia" -> NEFROLOGIA).
+                 - `app/analysis/specialty_evaluation.py` (novo): detector determinístico --
+                   evolução posterior ao pedido com cargo da especialidade-alvo ou linha "PELA
+                   <esp>" (ignora "pela manhã/tarde/noite") fecha como Concluída automaticamente,
+                   com a evidência e a data dessa evolução; varre o histórico do paciente no
+                   banco, não só a janela. Mesmo esquema para punção ("puncionado", "acesso obtido
+                   com sucesso") e exame (laudo/resultado, mantendo a exclusão de "aguardando
+                   laudo").
+                 - Regra de interconsulta (`rules.py`): gatilho com sinônimos ("solicito",
+                   "parecer da", "IC com") normalizado pela tabela de especialidades; evidência
+                   passa a ser a frase, não a nota inteira.
+                 - Primeira execução após a migração: o detector passa uma vez sobre as
+                   pendências já ativas (no banco de dev fecharia 15 de 27 interconsultas com
+                   especialidade reconhecível); contagem no log.
+                 - Tempo de resolução: em fechamento automático com evidência, `resolved_at` =
+                   data da evidência (nunca antes de created_at) -- senão a limpeza da migração
+                   inflaria a mediana.
+                 - Relatório: estado de cada pendência e bloco "Concluídas recentemente" com a
+                   evidência da conclusão. Dashboard: cartão "Em verificação pelo auditor".
+                 Testes: unit (detector, sinônimos, casamento por alvo, duas interconsultas
+                 simultâneas separadas, contrato v2 + reparo, omissão mantém estado, migração
+                 idempotente, eventos); E2E com fixtures sintéticas (pedido -> evolução da
+                 especialidade -> concluída; especialista pede exame -> pendência nova; punção com
+                 sucesso -> concluída; evidência incompleta -> em verificação); rodada do modelo
+                 real em casos sintéticos. Pergunta 3 do DEC-129.
+[ ] PEND-002     Fase 4 -- Confirmação manual pelo auditor (seção 5; casos 6 e 7; RF-30).
+                 - Janela "Revisar pendências" (Toplevel), aberta pela tabela de pacientes e pela
+                   janela ampliada (botão + menu de contexto; o duplo-clique continua abrindo o
+                   relatório): pendências por estado, evidência original da IA (nunca editada),
+                   evidência da conclusão e histórico.
+                 - Ações: "Marcar como resolvida" (Ativa/Em verificação -> Concluída pelo
+                   auditor), "Reabrir" (Concluída/Cancelada -> Ativa), "Manter ativa" (Em
+                   verificação -> Ativa); justificativa opcional. Grava nome do auditor
+                   (`AppConfig.auditor_name`, nas Configurações, perguntado uma vez se vazio),
+                   usuário do Windows e data/hora UTC num evento, tudo numa transação.
+                 - Atualização imediata: `_refresh_dashboard` + relatórios geral e individual
+                   regerados a partir do banco (`Repository.get_latest_run_id`, novo).
+                 - Proteções na análise seguinte: pendência concluída pelo auditor não é recriada
+                   com evidência anterior à decisão (só como item novo, com evidência posterior);
+                   reaberta pelo auditor só fecha com evidência posterior à reabertura. UPDATEs
+                   condicionais ao estado atual (auditor e Fase 2 podem gravar ao mesmo tempo).
+                 - Relatório: selo do estado; "Concluída pelo auditor <nome> em dd/mm/aaaa hh:mm
+                   -- <justificativa>"; histórico em `<details>` (funciona sem JavaScript); item
+                   em verificação diz "confirme no aplicativo".
+                 Testes: repositório (transação, eventos, condicionais), Tk (abrir, resolver,
+                 reabrir, cancelar diálogo), relatório, dashboard recalculada, proteções na
+                 análise seguinte. Pergunta 4 do DEC-129.
+[ ] EDD-002      Fase 5 -- Data provável de alta buscada na evolução MÉDICA (seção 8): `edd.py`
+                 só considera notas MEDICA (`sources.py`); dentro da nota, o bloco "Diagnóstico
+                 Descritivo" (até "Queixa Principal" ou o próximo rótulo do formulário) vem antes
+                 do resto do texto. Prompt: EDD registrada pela equipe médica. Cálculo
+                 determinístico também na Fase 1 (hoje só roda depois de uma análise de IA bem
+                 sucedida). Origem visível via coluna nova `edd_origem` (DOCUMENTADA / RELATIVA /
+                 PADRAO_OBSTETRICO), no lugar do booleano `edd_inferida`.
+                 Testes: casos sintéticos por fonte e por campo; migração `edd_inferida` ->
+                 `edd_origem`.
+[ ] EDD-003      Fase 5 -- Padrão obstétrico de 48h (seção 8). AGUARDA RESPOSTAS DO AUDITOR
+                 (pergunta 5: âncora admissão ou parto, cesárea, gestante sem marcador, RN).
+                 Proposta: unidade "Enfer. GO" (grafias normalizadas) + marcador PPCi/PPNi/"N° PPC"/
+                 "N° PPN"/pós-parto + nenhuma EDD documentada -> admissão + 2 dias, rótulo
+                 "(padrão obstétrico 48h)"; RN em "Enfer. GO-AC" -> própria admissão + 2 dias
+                 (vínculo com a mãe exigiria ler "Nome da Mãe", que o censo evita de propósito).
+                 EDD documentada sempre vence o padrão.
+[ ] LOOKUP-001   Fase 6 -- Localizar paciente com atualização ao vivo no GSUS (seção 10). Muda o
+                 RF-19 (DEC-067): decisão própria ao iniciar a fase.
+                 - `update_flow.run_single_patient` (novo, irmão de `run_update`; nunca
+                   `run_once`): mesma `_InstanceLock` (recusa com mensagem clara durante
+                   atualização geral); paciente montado da linha do banco;
+                   `records.open_current_admission`; Fase 1 (`_process_patient_rules`) ANTES de
+                   subir a IA; IA só se houver evolução nova (senão: "nada novo no GSUS desde
+                   ..."); `generate_patient_report`.
+                 - Sem efeitos de censo: não marca alta, não expurga, não reescreve o relatório
+                   geral, não grava diagnóstico de execução nem snapshot.
+                 - Tela: mostra na hora o último relatório local e troca pelo atualizado ao fim;
+                   progresso em etapas e botão Cancelar; paciente fora da internação atual ->
+                   mensagem (nunca preenche "Justificar Acesso", DEC-035).
+                 - A execução agendada espera a trava por até 60 min (hoje pula a noite se a
+                   trava estiver ocupada).
+                 Testes: fakes (trava ocupada, paciente sem internação, sem evolução nova, caminho
+                 feliz) + E2E sintético. Validação real: GSUS de verdade, só no PC de produção (ou
+                 aqui em horário combinado, nunca junto da execução de produção -- mesma conta).
+                 Pergunta 6 do DEC-129.
+[ ] ACCEPT-001   Fase 7 -- Release 1.6.0 (Fases 2 a 5; a 6 se pronta), instalação no PC de
+                 produção e validação dos 7 casos da seção 7 com o auditor, em pacientes reais,
+                 conferidos por ele (nunca por print do banco de produção, DEC-110). A primeira
+                 execução loga as contagens da migração (pendências fechadas pelo detector, itens
+                 em verificação, correções de exibição). Atualizar PROJECT_SPEC (RF-19, RF-23,
+                 RF-27, RF-30, RF novo de desligamento), README e CURRENT_STATE.
+```
+
 ## Notas de execução
 
 - `GSUS-001` a `GSUS-005` estão todos validados ponta a ponta contra o GSUS real (2026-08-20) -- `FROZEN`. Não mexer sem motivo real (seção 48 do prompt mestre).
