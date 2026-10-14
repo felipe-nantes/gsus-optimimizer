@@ -2558,3 +2558,68 @@ O usuário pediu um plano de execução no mesmo modelo do DEC-099, sem nenhuma 
 - Prévias com dados fictícios: dashboard em 1024×700 e 1280×860, janela ampliada, Configurações e janela de aviso.
 
 **Pendente:** validação real do desligamento no PC de produção, com o usuário presente. Ela confere a política do Windows do hospital e o comportamento com a tela bloqueada. As respostas do auditor à pergunta 1 podem ajustar os padrões adotados.
+
+**Fase 1 aprovada pelo usuário (2026-10-13)** e enviada ao GitHub, com o RF-31 (desligamento opcional) no PROJECT_SPEC.
+
+**Fase 2 implementada (2026-10-13): LLM-006.**
+
+*Achado novo ao implementar.* A extração do GSUS entrega os dias do MAIS NOVO para o mais antigo. Medição só de contagens no banco de dev: 2.641 trocas de dia "para trás" contra 39 "para frente" na ordem de gravação. O corte por tamanho (DEC-094) supunha ordem crescente e, nos pacientes acima do orçamento, descartava justamente as evoluções mais recentes. Agora as notas são ordenadas por horário antes dos cortes.
+
+*Decisões finais:*
+1. **Fonte pelo cargo** (`sources.py`).
+2. **Corte por recência, com uma garantia.** A evolução médica mais recente entra antes de qualquer outra, se couber, e nenhuma fonte fica com buraco na linha do tempo. A reserva fixa de 70% para notas médicas, que foi a primeira versão, caiu na revisão.
+3. **Orçamento de notas de 9.000 para 6.200 caracteres.** O prompt v2 tem 2.417 tokens contra 1.585 do antigo, medido com o `/tokenize` do llama-server em porta isolada. O total system prompt + notas segue nos 14.132 caracteres da calibração do DEC-093/094, protegido por teste. Preço: mais pacientes com "análise parcial" (o aviso do RF-26 já existe). Um prompt mais enxuto pode devolver espaço depois.
+4. **Prompt v2:**
+   - fonte e cargo em cada nota;
+   - marcador na evolução médica mais recente;
+   - localização do censo como fonte de verdade;
+   - papéis por campo, com as listas do auditor;
+   - VERDE e VERMELHO definidos;
+   - faixas de sinais vitais (proposta da pergunta 2).
+
+   O contrato JSON não mudou.
+5. **Filtros só de exibição, conservadores** (`clinical_filters.py`). Na dúvida, o texto fica.
+6. **Relatório sem as repetições de construção** (linha "Pendência principal" e linha "Classificação").
+
+*Avaliação com o modelo real, só casos fictícios, porta isolada:* 4 casos, prompt antigo contra novo. Carga do modelo: 69,7 s.
+- Os dois acertam a localização na UTI e a necessidade hospitalar baseada na evolução médica.
+- Os dois ainda põem rotina de enfermagem no contexto. O filtro de exibição é a rede de segurança.
+- Os dois MANTÊM "aguarda avaliação da infectologia" depois de uma evolução "PELA INFECTOLOGIA", e nenhum registra o exame novo pedido pelo especialista. Fica confirmado que a parte do pedido do auditor sobre pendências depende do detector determinístico do PEND-001 (Fase 3), não do prompt.
+- Tempo por análise equivalente: 88 a 204 s; o antigo precisou de mais tentativas de reparo.
+
+*Revisão adversarial:* 4 revisores e um verificador por achado; 16 confirmados e 5 refutados.
+- **Filtros agressivos demais.** Apagavam motivo de monitorização ("em monitorização por FA"), droga ("AVP para meropenem") e complicação de acesso ("sinais flogísticos"). Removiam substantivo negado ou do passado ("sem febre", "Febre no D1") e adjetivo de outra coisa ("elevada troponina"). Escondiam campo longo que acrescentava informação. Quebravam frases de histórico ("saiu do leito de observação").
+- **Corte com reserva de 70%.** Perdia a médica mais recente quando ela era grande e o evento de enfermagem de hoje.
+- **Contexto.** O prompt maior podia estourar o contexto na tentativa de reparo.
+
+Tudo foi reescrito, e cada contraexemplo virou teste.
+
+**Segunda revisão adversarial, sobre as correções:** 2 revisores e verificadores; 15 confirmados, todos corrigidos e transformados em teste.
+
+*Filtros:*
+- Setor obstétrico ("Enfer. GO") fica sem qualificação automática. Antes, a FC fetal era julgada pela faixa de adulto e a palavra "bradicárdico" sumia.
+- Negação em qualquer ponto do trecho ("não está taquicárdico", "nem febril") é respeitada.
+- Só a glicemia CAPILAR entra na faixa do HGT.
+- Suporte de O2 ou ventilação em qualquer parte do texto (TOT, TQT, PSV...) desliga a qualificação.
+- "Alta" depois do número nunca é removida, porque pode ser a alta do paciente.
+- "Aceitando dieta", "estável" e "sem sinais flogísticos" sozinhos não são rotina.
+- Repetição só esconde um campo quando TODO o conteúdo já apareceu, contando siglas como TC, RM, EDA e ETE.
+- Frase de trajetória com verbo no passado ou com duração ou data não perde a localização.
+- Vírgula dentro de parênteses não separa trecho, e o ";" final da frase é preservado.
+
+*Corte de notas:*
+- A evolução médica mais recente maior que o orçamento entra TRUNCADA, com aviso. Antes ela sumia, e a enfermagem virava a base de hoje; uma nota única gigante também, porque inteira estourava o contexto.
+- A continuidade vale por fonte real: médica, enfermagem, multiprofissional e não identificada.
+- Nota sem data conta como a mais antiga.
+- Quando as notas novas não têm evolução médica (execução noturna depois de um "Atualizar agora", ou fim de semana), a evolução médica mais recente da internação vai junto como referência.
+
+*Rede de segurança:* sempre que um filtro ajusta algo, o relatório oferece "Ver texto original da análise" num bloco recolhível. Mesmo um caso que nenhum filtro previu nunca apaga informação de vez.
+
+**Verificação:**
+- Suíte unitária + E2E: 696 aprovados (eram 528).
+- Integração: 24 aprovados e os mesmos 10 erros conhecidos de Chromium.
+- Prévia do relatório com dados fictícios, renderizada no Firefox do app.
+
+**Pendente:**
+- Validação real na 1.6.0.
+- As faixas de sinais vitais dependem da resposta do auditor à pergunta 2.

@@ -1428,3 +1428,43 @@ Nenhum teste executa `shutdown.exe`: há runner falso e uma trava que recusa o c
 - Validação real do desligamento no PC de produção, com o usuário presente.
 - Respostas do auditor.
 - Fase 2 (LLM-006).
+
+**Depois:** Fase 1 aprovada pelo usuário e enviada ao GitHub (`059719c`, com o RF-31 no PROJECT_SPEC).
+
+---
+
+## 2026-10-13 (3) — Fase 2 dos ajustes do auditor implementada (LLM-006: fonte priorizada e síntese clínica v2)
+
+**Pedido do usuário:** "Fase 1 aprovada, pode continuar".
+
+**Feito (detalhe no adendo da Fase 2 do DEC-129 e em TASKS.md::LLM-006):**
+- Fonte de cada evolução pelo cargo.
+- Notas ordenadas por horário antes dos cortes. Bug real: o GSUS entrega o dia mais novo primeiro, e o corte por tamanho descartava as evoluções mais recentes.
+- Corte por recência com a evolução médica mais recente garantida.
+- Orçamento de notas recalibrado de 9.000 para 6.200 caracteres, medido em tokens reais.
+- Prompt v2 com as regras do auditor e a localização do censo.
+- Filtros conservadores, só na exibição (rotina, sinal vital, "leito de observação" em UTI, campos repetidos).
+- Relatório sem as repetições de construção.
+- `especialidade_responsavel` preenchida.
+
+**Método:**
+- Implementação e testes.
+- Avaliação com o modelo real em 4 casos fictícios, numa porta isolada (8899), prompt antigo contra novo.
+- Revisão adversarial com 4 revisores e verificadores: 16 achados confirmados e corrigidos.
+- Segunda revisão sobre as correções: mais 15 confirmados e corrigidos. Entraram:
+  - setor obstétrico sem qualificação automática;
+  - negação respeitada em qualquer ponto do trecho;
+  - evolução médica truncada em vez de descartada;
+  - evolução médica de referência nas rodadas só com enfermagem;
+  - "Ver texto original da análise" no relatório.
+- Contagem de tokens com o `/tokenize` do llama-server.
+- Prévia do relatório com dados fictícios no Firefox do app.
+
+**Achado principal da avaliação real:** o modelo de 8B não fecha sozinho a interconsulta já respondida, com nenhum dos dois prompts. O detector determinístico da Fase 3 (PEND-001) é indispensável. Ele também segue escrevendo rotina no contexto, o que o filtro de exibição cobre.
+
+**Testes:** unitários + E2E com 696 aprovados (eram 528); integração com 24 aprovados e os 10 erros conhecidos de Chromium.
+
+**Pendente:**
+- Commit local da Fase 2 e push depois da aprovação do usuário.
+- Respostas do auditor (pergunta 2 antes de valer em produção).
+- Fase 3 (PEND-001).

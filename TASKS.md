@@ -856,38 +856,54 @@ mínimos de aceitação da seção 7 (cada um vira teste nomeado).
                  produção, com o usuário presente (política do Windows do hospital, comportamento
                  com tela bloqueada). Pergunta 1 do DEC-129 segue aberta (padrão adotado: só a
                  atualização agendada, desliga mesmo após falha, aviso de 3 min).
-[ ] LLM-006      Fase 2 -- Fonte priorizada e síntese clínica v2 (seções 1, 2 e 6; casos 1, 4 e 5).
+[x] LLM-006      Fase 2 -- Fonte priorizada e síntese clínica v2 (seções 1, 2 e 6; casos 1, 4 e 5).
+                 IMPLEMENTADO 2026-10-13 (DEC-129, adendo da Fase 2).
                  - `app/analysis/sources.py` (novo): cargo (`notes.source_type`) -> MEDICA /
-                   ENFERMAGEM / MULTIPROFISSIONAL / NAO_IDENTIFICADA (valores espúrios como
-                   "Direita"/"Esquerda", ~1,5% no banco de dev, caem aqui). Tabela montada a
-                   partir dos ~40 cargos reais medidos.
-                 - Prompt (`llm.py::build_prompt`): cabeçalho com a fonte; marcador "MAIS RECENTE"
-                   na evolução MÉDICA mais recente (fallback: a mais recente de qualquer fonte);
-                   bloco "LOCALIZAÇÃO ATUAL (censo do GSUS, fonte de verdade)" com unidade, leito
-                   e DIH (`_run_llm_analysis` passa a receber o paciente).
-                 - Orçamento (`_limit_to_recent_window`/`_limit_to_char_budget`): médicas
-                   primeiro, depois as demais. Conferir a premissa de ordem cronológica das notas
-                   (achado em aberto: se o GSUS listar o dia mais novo primeiro, o corte descarta
-                   as novas).
-                 - System prompt v2: papéis curtos e distintos por campo; listas incluir/excluir
-                   da seção 1; definição de VERDE/VERMELHO; faixas de sinais vitais
-                   (`app/analysis/vital_ranges.py`, novo, parametrizável; faixas de adulto
-                   propostas ao auditor -- pergunta 2; O2/suporte ventilatório e setores
-                   pediátricos, neonatais e de alojamento conjunto sem qualificação automática);
-                   "não descreva localização diferente da do censo".
-                 - `app/analysis/clinical_filters.py` (novo), aplicado na EXIBIÇÃO (relatório e
-                   dashboard), nunca no texto gravado da IA: repetição entre campos (similaridade
-                   de tokens), frase só de rotina sem complicação (AVP, monitorização, "cuidados
-                   de enfermagem"), qualificador de sinal vital que contradiz a faixa,
-                   "observação" para paciente em UTI. Contadores por execução no log.
-                 - Relatório: sem a repetição de construção ("Pendência principal" destacada na
-                   própria lista; selo do dia sem a linha duplicada).
-                 - Bug: `especialidade_responsavel` sempre NULL (lê `specialty`, sempre nulo) --
-                   passa a vir do cargo da evolução médica mais recente.
-                 Testes: unit (fontes, orçamento, prompt com localização e marcador, filtros dos
-                 casos 1, 4 e 5, relatório sem repetição) + rodada do modelo real em casos
-                 sintéticos nesta máquina (porta isolada, DEC-123), aderência e tempo por análise
-                 contra LLM-001 (80,6 s). Sem migração de banco.
+                   ENFERMAGEM / MULTIPROFISSIONAL / NAO_IDENTIFICADA ("Direita"/"Esquerda",
+                   sobras do parser, nunca contam como médica).
+                 - Bug real achado: a extração do GSUS entrega os dias do MAIS NOVO pro mais antigo
+                   (2.641 trocas de dia "pra trás" x 39 "pra frente", só contagem no banco de dev) e
+                   o corte por tamanho descartava justamente as evoluções mais recentes. Agora
+                   `_sort_chronologically` antes dos cortes; corte por recência com a evolução
+                   MÉDICA mais recente garantida e sem buraco na linha do tempo de cada fonte.
+                 - Orçamento de notas 9.000 -> 6.200 caracteres: o prompt v2 subiu de 1.585 pra
+                   2.417 tokens (medido com o /tokenize do llama-server em porta isolada); mantido
+                   o total calibrado system prompt + notas (14.132), com teste de guarda.
+                 - Prompt v2 (`llm.py`): fonte e cargo no cabeçalho de cada nota, marcador na
+                   evolução MÉDICA mais recente, bloco LOCALIZAÇÃO ATUAL do censo, regras por
+                   campo (listas incluir/excluir do auditor, VERDE/VERMELHO definidos), faixas de
+                   sinais vitais (`app/analysis/vital_ranges.py`, proposta enviada ao auditor --
+                   pergunta 2), aviso de setor pediátrico/neonatal. Contrato JSON inalterado.
+                 - `app/analysis/clinical_filters.py` (novo), só na EXIBIÇÃO (relatório e
+                   dashboard), nunca no texto gravado: tira só o que comprovadamente é rotina,
+                   qualificador colado a valor normal, "leito de observação" presente pra
+                   paciente em UTI e campo que só repete outro -- na dúvida o texto fica (achado
+                   da revisão adversarial: a 1ª versão apagava motivo de monitorização, droga e
+                   complicação de acesso). Contagem das correções no log ao fim da execução.
+                 - Relatório: pendência principal não se repete numa linha à parte (selo
+                   "principal" na lista); selo do dia sem a linha "Classificação" duplicada.
+                 - Bug: `especialidade_responsavel` sempre NULL -> cargo da evolução médica mais recente.
+                 - Avaliação com o modelo real em casos FICTÍCIOS (porta isolada): o 8B segue
+                   pondo rotina no contexto (filtro necessário) e, nos dois prompts, MANTÉM
+                   "aguarda avaliação da infectologia" depois da evolução "PELA INFECTOLOGIA" --
+                   o detector determinístico do PEND-001 é indispensável. Tempo por análise
+                   equivalente ao prompt antigo.
+                 - 2ª revisão adversarial (sobre as correções): 15 achados, todos corrigidos --
+                   setor obstétrico sem qualificação automática (valores fetais, metas da
+                   gestação), negação em qualquer ponto do trecho, só glicemia CAPILAR, suporte
+                   de O2/ventilação em qualquer parte do texto, "aceitando dieta"/"estável" nunca
+                   tratados como rotina, repetição só quando TODO o conteúdo já apareceu (siglas
+                   contam), histórico de localização preservado; médica mais recente maior que o
+                   orçamento entra truncada com aviso (antes sumia), continuidade por fonte real,
+                   nota sem data como a mais antiga, e rodada só com enfermagem leva junto a
+                   evolução médica mais recente da internação como referência. Rede de
+                   segurança: o relatório mostra "Ver texto original da análise" sempre que um
+                   filtro ajustou algo.
+                 Testes: suíte 528 -> 696 (fontes, faixas, filtros com os casos 1, 4 e 5 e os
+                 contraexemplos das duas revisões, corte por recência, referência médica,
+                 prompt, relatório, dashboard).
+                 PENDENTE: faixas de sinais vitais só valem em produção após a resposta do
+                 auditor (pergunta 2); validação real na 1.6.0.
 [ ] PEND-001     Fase 3 -- Ciclo de vida das pendências (seções 3 e 4; casos 2, 3 e parte do 6).
                  - Esquema aditivo (`database.py::_migrate`): `pending_items` + `alvo`,
                    `resolution_source` (IA / REGRA / DETECTOR / AUDITOR / LEGADO),
