@@ -474,3 +474,68 @@ def test_report_labels_edd_inferred_from_a_relative_forecast(tmp_path):
     content = generate_report(repo, run_id, "Clínica Médica", tmp_path / "relatorio.html").read_text(encoding="utf-8")
 
     assert "01/01/2099 (a partir de previsão relativa na evolução)" in content
+
+
+# --------------------------------------------- LLM-006 (pedido do auditor, DEC-129)
+
+def _report_for_state(tmp_path, unit, context, **state_kwargs):
+    repo = _setup_repo(tmp_path)
+    patient_id = repo.upsert_patient(Patient(record_number="901", bed="03", unit=unit))
+    run_id = repo.start_run()
+    repo.enqueue_patients(run_id, [patient_id])
+    repo.mark_processing(run_id, patient_id)
+    repo.mark_done(run_id, patient_id)
+    repo.save_patient_state(patient_id, context, "Estável.", **state_kwargs)
+    return repo, patient_id, run_id
+
+
+def test_report_shows_the_cleaned_context_in_the_bed_block_and_in_the_census(tmp_path):
+    """Casos 1, 4 e 5 do auditor, de ponta a ponta no relatório: o texto
+    gravado da IA não muda, só a versão exibida."""
+    raw = "Em leito de observação, pneumonia grave em antibiótico, mantém AVP. FR baixa (18 irpm)."
+    repo, patient_id, run_id = _report_for_state(tmp_path, "UTI Geral (12 leitos)", raw)
+    content = generate_report(repo, run_id, "Auditoria", tmp_path / "relatorio.html").read_text(encoding="utf-8")
+
+    bed_block = content[content.index("LEITO 03"):]
+    assert "Pneumonia grave em antibiótico. FR (18 irpm)." in bed_block
+    visible = bed_block.split('<details class="original-text">')[0] + bed_block.split("</details>")[-1]
+    for unwanted in ("leito de observação", "mantém AVP", "FR baixa"):
+        assert unwanted not in visible
+    assert repo.get_patient_state(patient_id)["clinical_context"] == raw  # registro original intacto
+    # rede de segurança: o texto original da IA continua a um clique
+    assert "Ver texto original da análise" in bed_block and raw in bed_block
+
+
+def test_report_no_longer_repeats_the_main_pending_item_or_the_day_badge(tmp_path):
+    repo, patient_id, run_id = _report_for_state(
+        tmp_path, "ENF. MEDICO-CIRURGICA 1 (30 leitos)", "Colecistite aguda aguardando cirurgia.",
+        dia_classificacao="VERMELHO", dia_causa="Centro cirúrgico sem horário disponível hoje.",
+    )
+    repo.add_pending_item(patient_id, "PROCEDIMENTO_CIRURGIA", "Aguarda colecistectomia", "evid", "2026-08-20T08:00:00")
+    content = generate_report(repo, run_id, "Auditoria", tmp_path / "relatorio.html").read_text(encoding="utf-8")
+
+    assert "<strong>Pendência principal:</strong>" not in content
+    assert content.count("Aguarda colecistectomia") == 2  # uma no censo, uma na lista do paciente
+    assert 'class="main-tag">principal' in content
+    assert "Classificação:" not in content
+    assert "<strong>Causa do dia vermelho:</strong> Centro cirúrgico sem horário disponível hoje." in content
+
+
+def test_report_hides_a_field_that_only_repeats_another(tmp_path):
+    repo, _patient_id, run_id = _report_for_state(
+        tmp_path, "ENF. MEDICO-CIRURGICA 1 (30 leitos)", "Pneumonia comunitária em antibioticoterapia venosa.",
+        objetivo_terapeutico="Completar antibiótico e desmame de oxigênio.",
+        proximo_passo="Completar antibiótico e desmame de oxigênio.",
+    )
+    content = generate_report(repo, run_id, "Auditoria", tmp_path / "relatorio.html").read_text(encoding="utf-8")
+    visible = content.split('<details class="original-text">')[0] + content.split("</details>")[-1]
+    assert visible.count("Completar antibiótico e desmame de oxigênio.") == 1
+    assert ">Próximo passo<" not in visible
+
+
+def test_report_still_says_not_defined_when_the_ai_left_a_field_empty(tmp_path):
+    repo, _patient_id, run_id = _report_for_state(
+        tmp_path, "ENF. MEDICO-CIRURGICA 1 (30 leitos)", "Contexto.", objetivo_terapeutico=None, proximo_passo=None,
+    )
+    content = generate_report(repo, run_id, "Auditoria", tmp_path / "relatorio.html").read_text(encoding="utf-8")
+    assert content.count("(não definido)") == 2

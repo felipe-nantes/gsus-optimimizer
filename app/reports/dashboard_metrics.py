@@ -22,9 +22,11 @@ quanto tempo passe -- fecha a lacuna real do RF-28.
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from app.analysis.clinical_filters import build_display_summary, clean_text
 from app.analysis.priority import (
     PRIORITY_ALTA,
     PRIORITY_MEDIA,
@@ -142,7 +144,9 @@ def compute_patient_census_rows(repo: Repository) -> list[PatientCensusRow]:
             unit=patient["unit"] or "?",
             admission_date=patient["admission_date"],
             dih=days_since_admission(patient["admission_date"]),
-            clinical_context=state["clinical_context"] if state else None,
+            # LLM-006: mesma versão de exibição do relatório (rotina, sinal
+            # vital e localização corrigidos) -- nunca o texto cru da IA.
+            clinical_context=clean_text(state["clinical_context"], patient["unit"]) if state else None,
             active_pending_count=len(items),
             main_category=main["category"] if main else None,
             main_description=main["description"] if main else None,
@@ -363,3 +367,21 @@ def save_snapshot(repo: Repository, run_id: str) -> str:
         median_resolution_hours=indicators.median_resolution_hours,
         category_counts=category_counts,
     )
+
+
+def count_display_fixes(repo: Repository) -> Counter:
+    """LLM-006: soma, nos pacientes ativos já analisados, quantas correções
+    os filtros de exibição aplicam ao texto da IA (`clinical_filters`) --
+    chaves "rotina", "sinal_vital", "localizacao", "repeticao" e
+    "pacientes" (quantos tiveram ao menos uma). Só contagem, nunca texto:
+    vai pro log ao fim de cada execução como medida da aderência do prompt."""
+    total: Counter = Counter()
+    for patient in repo.get_all_active_patients():
+        state = repo.get_patient_state(patient["patient_id"])
+        if state is None:
+            continue
+        fixes = build_display_summary(state, patient["unit"]).fixes
+        total.update(fixes)
+        if sum(fixes.values()):
+            total["pacientes"] += 1
+    return total

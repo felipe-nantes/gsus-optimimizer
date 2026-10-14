@@ -22,6 +22,7 @@ from pathlib import Path
 from app.analysis.priority import (
     PRIORITY_ALTA, PRIORITY_MEDIA, compute_priority, days_since_admission, hours_elapsed_since, is_edd_overdue,
 )
+from app.analysis.clinical_filters import build_display_summary, clean_text
 from app.analysis.sla_config import get_sla_hours
 from app.reports import dashboard_metrics
 from app.storage.repository import Repository
@@ -81,7 +82,11 @@ h2 { letter-spacing: -.015em; }
 .pending .evidence { font-style: italic; color: #44464b; margin-top: 5px; }
 .pending .evidence-date { color: var(--muted); font-size: 11px; }
 .no-pending { color: var(--success); }
-.inferred-tag, .origin-tag { display: inline-block; font-size: 10px; border-radius: 999px; padding: 2px 7px; margin-left: 6px; }
+.inferred-tag, .origin-tag, .main-tag { display: inline-block; font-size: 10px; border-radius: 999px; padding: 2px 7px; margin-left: 6px; }
+.main-tag { color: #fff; background: var(--accent); font-weight: 650; }
+.original-text { margin: 8px 0 4px; font-size: 12px; color: var(--muted); }
+.original-text summary { cursor: pointer; }
+.original-text p { margin: 4px 0; }
 .inferred-tag { color: #8a5e00; background: #fff3cd; }
 .origin-tag { color: #4c4d52; background: #eeeff1; }
 .pending .meta-line { color: var(--muted); font-size: 11px; margin-top: 3px; }
@@ -421,7 +426,7 @@ def _render_census_row(bed: str, unit: str, admission_date: str | None, state, a
     cada linha, dois leitos com o mesmo rótulo (ex. "2A") em setores
     diferentes ficam indistinguíveis."""
     dih = _dih(admission_date)
-    context = (state["clinical_context"] if state else None) or (
+    context = (clean_text(state["clinical_context"], unit) if state else None) or (
         AWAITING_AI_TEXT if state is None else "(sem contextualização)"
     )
     context_short = (context[:80] + "…") if len(context) > 80 else context
@@ -552,56 +557,82 @@ def _render_bed(
     dih = _dih(admission_date)
     dih_label = f"{dih}º DIH" if dih is not None else "DIH não determinado"
 
-    if state and state["clinical_context"]:
-        clinical_context = html.escape(state["clinical_context"])
+    # LLM-006 (pedido do auditor, DEC-129 seções 1 e 6): versão de EXIBIÇÃO
+    # dos textos da IA -- rotina, sinal vital e localização corrigidos, e
+    # campo que só repete outro escondido. O texto gravado não muda.
+    main_description = annotated_items[0]["description"] if annotated_items else None
+    display = build_display_summary(state, unit, main_description) if state else None
+
+    if display and display.context:
+        clinical_context = html.escape(display.context)
     else:
         clinical_context = AWAITING_AI_TEXT if state is None else "(sem contextualização disponível)"
 
     necessidade_code = state["necessidade_hospitalar"] if state else None
     necessidade_label = NECESSIDADE_LABELS.get(necessidade_code, "não avaliada ainda")
-    justificativa = state["necessidade_hospitalar_justificativa"] if state else None
     necessidade_html = html.escape(necessidade_label)
-    if justificativa:
-        necessidade_html += f" — {html.escape(justificativa)}"
+    if display and display.justificativa:
+        necessidade_html += f" — {html.escape(display.justificativa)}"
 
-    objetivo = html.escape(state["objetivo_terapeutico"]) if state and state["objetivo_terapeutico"] else "(não definido)"
-    proximo_passo = html.escape(state["proximo_passo"]) if state and state["proximo_passo"] else "(não definido)"
+    def optional_section(label: str, raw_key: str, shown: str | None) -> str:
+        """Campo vazio na saída da IA -> "(não definido)"; campo que só
+        repetia outro -> some (o auditor já leu aquilo logo acima)."""
+        if shown:
+            return f'<div class="section-label">{label}</div>\n  <p>{html.escape(shown)}</p>'
+        if state and state[raw_key]:
+            return ""
+        return f'<div class="section-label">{label}</div>\n  <p>(não definido)</p>'
+
+    objetivo_html = optional_section("Objetivo", "objetivo_terapeutico", display.objetivo if display else None)
+    proximo_passo_html = optional_section("Próximo passo", "proximo_passo", display.proximo_passo if display else None)
     edd_html = _format_edd(
         state["edd_status"] if state else None, state["edd_data"] if state else None,
         inferred=bool(state["edd_inferida"]) if state else False,
     )
 
+    # Rede de segurança dos filtros (achado das revisões adversariais): se
+    # algo foi ajustado na exibição, o texto original da IA fica a um clique
+    # -- nenhuma informação some de vez, mesmo num caso que o filtro erre.
+    original_html = ""
+    if display and sum(display.fixes.values()):
+        raw_items = "".join(
+            f"<p><strong>{label}:</strong> {html.escape(state[key])}</p>"
+            for label, key in (
+                ("Contexto", "clinical_context"),
+                ("Necessidade hospitalar", "necessidade_hospitalar_justificativa"),
+                ("Objetivo", "objetivo_terapeutico"),
+                ("Próximo passo", "proximo_passo"),
+                ("Causa do dia", "dia_causa"),
+            )
+            if state[key]
+        )
+        original_html = (
+            '<details class="original-text"><summary>Ver texto original da análise '
+            f"(ajustado na exibição)</summary>{raw_items}</details>"
+        )
+
+    # O selo "DIA X" já está no título do bloco -- a linha de baixo só traz
+    # a causa do dia vermelho (antes repetia "Classificação: DIA X").
     dia = state["dia_classificacao"] if state else None
     day_badge = f'<span class="day-badge {html.escape(dia)}">DIA {html.escape(dia)}</span>' if dia else ""
-    dia_causa = state["dia_causa"] if state else None
     dia_line = ""
-    if dia:
-        dia_line = f"<p><strong>Classificação:</strong> DIA {html.escape(dia)}"
-        if dia_causa:
-            dia_line += f" — {html.escape(dia_causa)}"
-        dia_line += "</p>"
+    if dia == "VERMELHO" and display and display.dia_causa:
+        dia_line = f"<p><strong>Causa do dia vermelho:</strong> {html.escape(display.dia_causa)}</p>"
 
     # A evidência de CADA pendência (incluindo a principal) fica sempre
     # visível via `_render_pending` -- resumo em destaque não substitui
     # auditabilidade completa (RF-26: "o auditor deve conseguir clicar em
-    # 'de onde veio?'"). Bug real corrigido aqui: a 1ª versão só mostrava a
-    # evidência das pendências SECUNDÁRIAS, deixando o caso comum (uma
-    # única pendência) sem evidência nenhuma visível.
-    main_pending_html = ""
+    # 'de onde veio?'"). LLM-006: a pendência principal não é mais repetida
+    # numa linha à parte -- vem primeiro na lista, marcada como principal.
     all_pending_html = ""
     if annotated_items:
-        main = annotated_items[0]
-        main_pending_html = (
-            f"<p><strong>Pendência principal:</strong> {html.escape(main['description'])} "
-            f"({html.escape(main['_priority'])}, {html.escape(_format_hours(main['_hours_elapsed']))})</p>"
-        )
-        pending_label = "Pendências" if len(annotated_items) > 1 else "Evidência"
+        pending_label = "Pendências" if len(annotated_items) > 1 else "Pendência"
         all_pending_html = (
             f'<div class="section-label">{pending_label}</div>'
-            + "".join(_render_pending(item) for item in annotated_items)
+            + "".join(_render_pending(item, is_main=(i == 0)) for i, item in enumerate(annotated_items))
         )
     else:
-        main_pending_html = '<p class="no-pending">Sem pendências identificadas.</p>'
+        all_pending_html = '<p class="no-pending">Sem pendências identificadas.</p>'
 
     # Identificação operacional (seção 2A da orientação técnica): só exibe
     # se pelo menos um dos dois for conhecido -- dado que nem toda análise
@@ -654,14 +685,12 @@ def _render_bed(
   <p>{clinical_context}</p>
   <div class="section-label">Necessidade hospitalar</div>
   <p>{necessidade_html}</p>
-  <div class="section-label">Objetivo</div>
-  <p>{objetivo}</p>
-  {main_pending_html}
-  <div class="section-label">Próximo passo</div>
-  <p>{proximo_passo}</p>
+  {objetivo_html}
+  {proximo_passo_html}
   <div class="section-label">Previsão de alta</div>
   <p>{edd_html}</p>
   {dia_line}
+  {original_html}
   {all_pending_html}
   {audit_trail_html}
 </div>"""
@@ -672,7 +701,7 @@ def _format_sla(category: str) -> str:
     return f"SLA institucional: {limit}h" if limit is not None else "sem SLA definido"
 
 
-def _render_pending(item: dict) -> str:
+def _render_pending(item: dict, is_main: bool = False) -> str:
     extra_evidence = item.get("_extra_evidence") or []
     has_multiple = bool(extra_evidence)
 
@@ -691,6 +720,11 @@ def _render_pending(item: dict) -> str:
         for i, row in enumerate(extra_evidence)
     )
 
+    main_tag = (
+        f'<span class="main-tag">principal · {html.escape(item["_priority"])} · '
+        f'{html.escape(_format_hours(item["_hours_elapsed"]))}</span>'
+        if is_main else ""
+    )
     inferred_tag = '<span class="inferred-tag">inferido</span>' if item.get("is_inferred") else ""
     origin_label = ORIGIN_LABELS.get(item.get("origin"))
     origin_tag = f'<span class="origin-tag">barreira {html.escape(origin_label)}</span>' if origin_label else ""
@@ -704,7 +738,7 @@ def _render_pending(item: dict) -> str:
     meta_line = f'<div class="meta-line">{html.escape(" · ".join(meta_parts))}</div>'
 
     return f"""<div class="pending">
-  <div class="category">{html.escape(item['category'])} — {html.escape(item['description'])}{inferred_tag}{origin_tag}</div>
+  <div class="category">{html.escape(item['category'])} — {html.escape(item['description'])}{main_tag}{inferred_tag}{origin_tag}</div>
   {first_evidence_html}
   {extra_evidence_html}
   {meta_line}

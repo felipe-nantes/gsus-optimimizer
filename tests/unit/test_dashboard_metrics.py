@@ -402,3 +402,36 @@ def test_save_snapshot_on_empty_database_does_not_crash(repo):
     assert snapshots[0]["snapshot_id"] == snapshot_id
     assert snapshots[0]["total_active_patients"] == 0
     assert snapshots[0]["median_resolution_hours"] is None
+
+
+def test_patient_census_rows_show_the_cleaned_context(tmp_path):
+    """LLM-006: a tabela da dashboard usa a mesma versão de exibição do
+    relatório (casos 1, 4 e 5 do auditor)."""
+    from app.models import Patient
+    from app.reports.dashboard_metrics import compute_patient_census_rows
+    from app.storage import database
+    from app.storage.repository import Repository
+
+    repo = Repository(database.init_db(tmp_path / "auditoria.db"))
+    patient_id = repo.upsert_patient(Patient(record_number="902", bed="04", unit="UTI Geral (12 leitos)"))
+    repo.save_patient_state(patient_id, "Em leito de observação, choque séptico, mantém AVP.", "Grave.")
+    row = compute_patient_census_rows(repo)[0]
+    assert row.clinical_context == "Choque séptico."
+
+
+def test_count_display_fixes_sums_only_counts_over_active_patients(tmp_path):
+    from app.models import Patient
+    from app.reports.dashboard_metrics import count_display_fixes
+    from app.storage import database
+    from app.storage.repository import Repository
+
+    repo = Repository(database.init_db(tmp_path / "auditoria.db"))
+    uti = repo.upsert_patient(Patient(record_number="903", bed="05", unit="UTI Geral (12 leitos)"))
+    repo.save_patient_state(uti, "Em leito de observação, choque séptico, mantém AVP. FR baixa (18 irpm).", "Grave.")
+    clean = repo.upsert_patient(Patient(record_number="904", bed="06", unit="ENF. MEDICO-CIRURGICA 1 (30 leitos)"))
+    repo.save_patient_state(clean, "Erisipela em melhora com oxacilina.", "Estável.")
+    repo.upsert_patient(Patient(record_number="905", bed="07", unit="ENF. MEDICO-CIRURGICA 1 (30 leitos)"))  # sem análise
+
+    fixes = count_display_fixes(repo)
+    assert fixes["pacientes"] == 1
+    assert (fixes["rotina"], fixes["sinal_vital"], fixes["localizacao"], fixes["repeticao"]) == (1, 1, 1, 0)
