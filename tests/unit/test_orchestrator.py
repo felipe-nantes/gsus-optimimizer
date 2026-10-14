@@ -49,7 +49,7 @@ class StubLLMSequence:
         self._responses = list(responses)
         self.calls = 0
 
-    def analyze_patient(self, previous_state, new_notes, active_pending_items=None):
+    def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
         response = self._responses[min(self.calls, len(self._responses) - 1)]
         self.calls += 1
         return response
@@ -184,19 +184,23 @@ def test_pending_items_are_tagged_with_llm_source(repo):
 
 # ---------------------------------------------- especialidade/origem/model_version (DEC-063)
 
-def test_especialidade_responsavel_comes_from_most_recent_note_not_the_llm(repo):
-    """RF-07/RF-08: a especialidade já é metadado estruturado (extraído do
-    cabeçalho da evolução) -- não pedimos pro LLM adivinhar de novo."""
+def test_especialidade_responsavel_comes_from_most_recent_physician_role_not_the_llm(repo):
+    """RF-07/RF-08: a especialidade já é metadado estruturado (o cargo no
+    cabeçalho da evolução) -- não pedimos pro LLM adivinhar de novo.
+    LLM-006: antes lia `specialty`, que o parser real nunca preenche (campo
+    sempre NULL em produção); agora é o cargo da evolução MÉDICA mais
+    recente -- uma anotação de enfermagem posterior não muda nada."""
     patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
     llm = StubLLMSequence([_base_analysis()])
     notes = [
-        _note(timestamp="2026-08-20T08:00:00"),  # specialty="Clínica Médica" (default do helper)
-        StructuredNote(timestamp="2026-08-21T08:00:00", specialty="Infectologia", source_type="Evolução", text="x"),
+        StructuredNote(timestamp="2026-08-20T08:00:00", specialty=None, source_type="Médico clínico", text="x"),
+        StructuredNote(timestamp="2026-08-21T08:00:00", specialty=None, source_type="Médico infectologista", text="y"),
+        StructuredNote(timestamp="2026-08-21T20:00:00", specialty=None, source_type="Técnico de enfermagem", text="z"),
     ]
 
     _run_llm_analysis(repo, patient_id, llm, notes)
 
-    assert repo.get_patient_state(patient_id)["especialidade_responsavel"] == "Infectologia"
+    assert repo.get_patient_state(patient_id)["especialidade_responsavel"] == "Médico infectologista"
 
 
 def test_model_version_is_stamped_from_llm_when_available(repo):
@@ -561,10 +565,17 @@ def test_limit_to_char_budget_drops_oldest_notes_first_until_it_fits():
 
 
 def test_limit_to_char_budget_never_returns_empty_even_if_single_note_exceeds_budget():
+    """Nunca zero notas. LLM-006: inteira, uma nota maior que o orçamento
+    estourava o contexto (HTTP 400, DEC-093) e a análise falhava -- agora vai
+    o começo dela, com aviso de corte."""
+    from app.orchestrator import TRUNCATION_NOTICE
+
     huge = _note("x" * 5000)
     result, limited = _limit_to_char_budget([huge], max_chars=1000)
-    assert result == [huge]  # sozinha, mesmo estourando -- nunca zero notas
-    assert limited is False  # não há mais nada a cortar (só 1 nota)
+    assert len(result) == 1
+    assert len(result[0].text) <= 1000
+    assert result[0].text.endswith(TRUNCATION_NOTICE)
+    assert limited is True
 
 
 def test_prepare_notes_for_llm_reports_limited_when_only_size_cuts_something():
@@ -703,3 +714,201 @@ def test_explicit_llm_edd_wins_over_relative_forecast_and_is_not_marked_inferred
 
     state = repo.get_patient_state(patient_id)
     assert (state["edd_data"], state["edd_inferida"]) == ("2026-09-15", 0)
+
+
+# --------------------------------------------- LLM-006 (pedido do auditor, DEC-129)
+
+def _src_note(timestamp, source_type, size=10, text=None):
+    return StructuredNote(timestamp=timestamp, specialty=None, source_type=source_type, text=text or "x" * size)
+
+
+def test_newest_notes_survive_the_size_cut_even_when_extraction_lists_newest_day_first():
+    """Achado da Fase 2 (contagem no banco de dev: 2.641 trocas de dia "pra
+    trás" contra 39 "pra frente"): a extração entrega o dia mais novo
+    primeiro, e o corte por tamanho descartava justamente as evoluções mais
+    recentes. Agora as notas são ordenadas por horário antes de cortar."""
+    from app.orchestrator import MAX_NOTES_CHARS_FOR_LLM
+
+    half = MAX_NOTES_CHARS_FOR_LLM // 2 + 100
+    as_extracted = [  # dia mais novo primeiro, como vem do GSUS
+        _src_note("2026-08-22T08:00:00", "Médico clínico", half, text="N" * half),
+        _src_note("2026-08-21T08:00:00", "Médico clínico", half, text="M" * half),
+        _src_note("2026-08-20T08:00:00", "Médico clínico", half, text="O" * half),
+    ]
+    kept, limited = _prepare_notes_for_llm(as_extracted, LLM_LOOKBACK_DAYS)
+    assert limited is True
+    assert [n.timestamp for n in kept] == ["2026-08-22T08:00:00"]  # a mais nova, nunca a mais antiga
+
+
+def _kept(notes, budget=9000):
+    kept, limited = _limit_to_char_budget(sorted(notes, key=lambda n: n.timestamp), budget)
+    assert limited is True
+    kept_ts = [n.timestamp for n in kept]
+    assert kept_ts == sorted(kept_ts)  # sempre em ordem cronológica
+    return kept_ts
+
+
+def test_size_cut_keeps_the_newest_notes_and_never_drops_the_newest_physician_note():
+    """Seção 2 do auditor: a evolução médica mais recente é a base de hoje
+    -- entra antes de tudo. O resto segue a recência, como sempre foi."""
+    kept = _kept([
+        _src_note("2026-08-18T08:00:00", "Médico clínico", 3000),
+        _src_note("2026-08-19T08:00:00", "Técnico de enfermagem", 3000),
+        _src_note("2026-08-20T08:00:00", "Médico clínico", 3000),
+        _src_note("2026-08-21T08:00:00", "Enfermeiro", 3000),
+        _src_note("2026-08-21T10:00:00", "Médico residente", 3000),
+        _src_note("2026-08-21T22:00:00", "Técnico de enfermagem", 3000),
+    ])
+    assert kept == ["2026-08-21T08:00:00", "2026-08-21T10:00:00", "2026-08-21T22:00:00"]
+
+
+def test_big_newest_physician_note_is_kept_with_the_recent_nursing_that_fits():
+    """Achado da revisão: com a reserva de 70%, uma médica de 7.000
+    caracteres caía e só a enfermagem chegava ao modelo -- marcada como
+    base de hoje, o contrário do pedido do auditor."""
+    kept = _kept([
+        _src_note("2026-08-21T08:00:00", "Médico clínico", 7000),
+        _src_note("2026-08-21T14:00:00", "Enfermeiro", 1250),
+        _src_note("2026-08-21T20:00:00", "Enfermeiro", 1250),
+    ])
+    assert kept == ["2026-08-21T08:00:00", "2026-08-21T20:00:00"]
+
+
+def test_todays_nursing_event_wins_over_a_ten_day_old_physician_note():
+    """Achado da revisão: a reserva fixa pras médicas trocava o evento de
+    enfermagem de hoje (ex.: dessaturação) por uma médica de 10 dias atrás."""
+    kept = _kept([
+        _src_note("2026-08-11T08:00:00", "Médico clínico", 2000),
+        _src_note("2026-08-12T08:00:00", "Técnico de enfermagem", 400),
+        _src_note("2026-08-13T08:00:00", "Técnico de enfermagem", 400),
+        _src_note("2026-08-20T08:00:00", "Médico clínico", 2000),
+        _src_note("2026-08-21T08:00:00", "Médico clínico", 2000),
+        _src_note("2026-08-21T21:00:00", "Enfermeiro", 3200),
+    ])
+    assert "2026-08-21T21:00:00" in kept and "2026-08-11T08:00:00" not in kept
+
+
+def test_size_cut_leaves_no_hole_in_a_source_timeline():
+    """Quando uma médica não cabe, as médicas mais antigas também ficam de
+    fora -- nunca "hoje e anteontem sem ontem"."""
+    kept = _kept([
+        _src_note("2026-08-19T08:00:00", "Médico clínico", 2000),
+        _src_note("2026-08-20T08:00:00", "Médico clínico", 4000),
+        _src_note("2026-08-21T08:00:00", "Médico clínico", 4000),
+        _src_note("2026-08-21T20:00:00", "Enfermeiro", 2500),
+    ])
+    assert kept == ["2026-08-21T08:00:00", "2026-08-21T20:00:00"]
+
+
+def test_physician_note_larger_than_the_whole_budget_is_kept_truncated_not_dropped():
+    """Achado da 2ª revisão: a médica mais recente maior que o orçamento
+    sumia e a enfermagem virava a "base de hoje" no prompt. Agora vai o
+    começo dela, com aviso de corte."""
+    from app.orchestrator import TRUNCATION_NOTICE
+
+    notes = [
+        _src_note("2026-08-19T08:00:00", "Médico clínico", 20000),
+        _src_note("2026-08-20T08:00:00", "Técnico de enfermagem", 50),
+    ]
+    kept, limited = _limit_to_char_budget(notes, 6200)
+    assert limited is True
+    assert [n.source_type for n in kept] == ["Médico clínico"]
+    assert kept[0].text.endswith(TRUNCATION_NOTICE) and len(kept[0].text) <= 6200
+
+
+def test_each_source_keeps_its_own_timeline():
+    """Achado da 2ª revisão: enfermagem, multiprofissional e "fonte não
+    identificada" eram um grupo só -- uma fisioterapia grande que não cabia
+    derrubava as anotações de enfermagem de hoje, com orçamento sobrando."""
+    kept = _kept([
+        _src_note("2026-08-20T19:00:00", "Técnico de enfermagem", 400),
+        _src_note("2026-08-21T08:00:00", "Médico clínico", 3000),
+        _src_note("2026-08-21T19:00:00", "Técnico de enfermagem", 400),
+        _src_note("2026-08-21T21:00:00", "Fisioterapeuta geral", 3500),
+    ], budget=6200)
+    assert kept == ["2026-08-20T19:00:00", "2026-08-21T08:00:00", "2026-08-21T19:00:00"]
+
+
+def test_undated_notes_count_as_the_oldest_and_never_block_dated_ones():
+    notes = [
+        _src_note("2026-08-21T08:00:00", "Médico clínico", 2000),
+        _src_note("2026-08-21T20:00:00", "Técnico de enfermagem", 300),
+        StructuredNote(timestamp=None, specialty=None, source_type="Evolução", text="u" * 4500),
+    ]
+    kept, limited = _limit_to_char_budget(notes, 6200)
+    assert limited is True
+    assert [n.timestamp for n in kept] == ["2026-08-21T08:00:00", "2026-08-21T20:00:00"]
+
+
+def test_census_location_reaches_the_analysis_engine(repo):
+    """Caso 1 do auditor: unidade e leito do censo vão pro prompt como fonte
+    de verdade da localização."""
+    patient_id = repo.upsert_patient(
+        Patient(record_number="77", bed="UTI-03", unit="UTI Geral (12 leitos)", admission_date="18/08/2026")
+    )
+    seen = []
+
+    class RecordingLLM(StubLLMSequence):
+        def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
+            seen.append(patient_context)
+            return super().analyze_patient(previous_state, new_notes, active_pending_items, patient_context)
+
+    _run_llm_analysis(repo, patient_id, RecordingLLM([_base_analysis()]), [_note()])
+    assert seen == [{"unit": "UTI Geral (12 leitos)", "bed": "UTI-03", "admission_date": "18/08/2026"}]
+
+
+def test_when_nothing_fits_the_most_recent_physician_note_goes_alone():
+    notes = [
+        _src_note("2026-08-19T08:00:00", "Médico clínico", 20000),
+        _src_note("2026-08-20T08:00:00", "Técnico de enfermagem", 20000),
+    ]
+    kept, limited = _limit_to_char_budget(notes, 9000)
+    assert limited is True
+    assert [n.source_type for n in kept] == ["Médico clínico"]
+
+
+def test_nursing_only_increment_brings_the_latest_physician_note_as_reference(repo):
+    """Achado da 2ª revisão do LLM-006: a execução da noite só manda o que é
+    novo; se a evolução médica do dia já foi analisada, a anotação de
+    enfermagem virava a "base de hoje". Agora a médica mais recente desta
+    internação vai junto como referência."""
+    from app.extraction.hashing import compute_note_hash
+
+    patient_id = repo.upsert_patient(Patient(record_number="88", bed="05", unit="ENF. MEDICO-CIRURGICA 2", admission_date="18/08/2026"))
+    for ts, role, text in (
+        ("2026-08-10T08:00:00", "Médico clínico", "evolução de outra internação"),
+        ("2026-08-20T09:00:00", "Médico clínico", "pielonefrite em ceftriaxona EV"),
+    ):
+        repo.add_note(Note(patient_id=patient_id, source_type=role, specialty=None, timestamp=ts, text=text,
+                           text_hash=compute_note_hash(ts, role, None, text)))
+    seen = []
+
+    class RecordingLLM(StubLLMSequence):
+        def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
+            seen.append([(n.timestamp, n.source_type) for n in new_notes])
+            return super().analyze_patient(previous_state, new_notes, active_pending_items, patient_context)
+
+    nursing = StructuredNote(timestamp="2026-08-20T22:00:00", specialty=None, source_type="Enfermeiro", text="tranquilo")
+    _run_llm_analysis(repo, patient_id, RecordingLLM([_base_analysis()]), [nursing])
+
+    assert seen == [[("2026-08-20T09:00:00", "Médico clínico"), ("2026-08-20T22:00:00", "Enfermeiro")]]
+    assert repo.get_patient_state(patient_id)["especialidade_responsavel"] == "Médico clínico"
+
+
+def test_reference_physician_note_never_comes_from_a_previous_admission(repo):
+    from app.extraction.hashing import compute_note_hash
+
+    patient_id = repo.upsert_patient(Patient(record_number="89", bed="06", unit="U", admission_date="18/08/2026"))
+    old = ("2026-08-01T08:00:00", "Médico clínico", "internação anterior")
+    repo.add_note(Note(patient_id=patient_id, source_type=old[1], specialty=None, timestamp=old[0], text=old[2],
+                       text_hash=compute_note_hash(old[0], old[1], None, old[2])))
+    seen = []
+
+    class RecordingLLM(StubLLMSequence):
+        def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
+            seen.append([n.source_type for n in new_notes])
+            return super().analyze_patient(previous_state, new_notes, active_pending_items, patient_context)
+
+    nursing = StructuredNote(timestamp="2026-08-20T22:00:00", specialty=None, source_type="Enfermeiro", text="x")
+    _run_llm_analysis(repo, patient_id, RecordingLLM([_base_analysis()]), [nursing])
+    assert seen == [["Enfermeiro"]]

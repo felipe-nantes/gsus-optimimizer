@@ -112,7 +112,7 @@ class StubLLM:
     """Substitui LocalLLM real: devolve uma análise válida e fixa para
     qualquer paciente com notas novas, sem precisar de llama-server/modelo."""
 
-    def analyze_patient(self, previous_state, new_notes, active_pending_items=None):
+    def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
         return {
             "clinical_context": "Contexto clínico sintetizado a partir das evoluções.",
             "current_status": "Situação clínica sintetizada a partir das evoluções.",
@@ -279,9 +279,9 @@ class OrderRecordingLLM(StubLLM):
     def __init__(self):
         self.call_sizes: list[int] = []
 
-    def analyze_patient(self, previous_state, new_notes, active_pending_items=None):
+    def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
         self.call_sizes.append(sum(len(note.text) for note in new_notes))
-        return super().analyze_patient(previous_state, new_notes, active_pending_items)
+        return super().analyze_patient(previous_state, new_notes, active_pending_items, patient_context)
 
 
 def test_pipeline_processes_fresh_patients_in_fase1_completion_order(tmp_path):
@@ -512,7 +512,7 @@ class AlwaysFailingLLM(StubLLM):
     `_run_llm_analysis` absorve isso e mantém o estado anterior (aqui,
     nenhum -- paciente nunca teve análise bem-sucedida)."""
 
-    def analyze_patient(self, previous_state, new_notes, active_pending_items=None):
+    def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
         raise LLMAnalysisError("simulado: falha de validação persistente")
 
 
@@ -548,9 +548,9 @@ class UnhealthyLLM(StubLLM):
     def is_healthy(self):
         return False
 
-    def analyze_patient(self, previous_state, new_notes, active_pending_items=None):
+    def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
         self.analyze_calls += 1
-        return super().analyze_patient(previous_state, new_notes, active_pending_items)
+        return super().analyze_patient(previous_state, new_notes, active_pending_items, patient_context)
 
 
 def test_pipeline_health_circuit_breaker_skips_analysis_when_llm_is_unresponsive(tmp_path):
@@ -832,9 +832,9 @@ class StoppableStubLLM(StubLLM):
         self.stopped = False
         self.analyze_calls = 0
 
-    def analyze_patient(self, previous_state, new_notes, active_pending_items=None):
+    def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
         self.analyze_calls += 1
-        return super().analyze_patient(previous_state, new_notes, active_pending_items)
+        return super().analyze_patient(previous_state, new_notes, active_pending_items, patient_context)
 
     def stop(self):
         self.stopped = True

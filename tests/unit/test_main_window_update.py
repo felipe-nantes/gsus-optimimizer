@@ -148,7 +148,7 @@ class FakeLLMOk:
     def stop(self):
         self.stopped = True
 
-    def analyze_patient(self, previous_state, new_notes, active_pending_items=None):
+    def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
         self.analyze_calls += 1
         return {"insufficient_information": True}
 

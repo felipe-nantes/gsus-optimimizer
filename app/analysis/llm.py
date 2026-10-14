@@ -20,8 +20,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from app.analysis import vital_ranges
 from app.analysis.rules import StructuredNote, most_recent_note
 from app.analysis.schemas import normalize_null_sentinels, validate_analysis_output
+from app.analysis.sources import is_physician, source_label
 from app.analysis.taxonomy import SUBTYPES_BY_CATEGORY
 
 logger = logging.getLogger(__name__)
@@ -193,25 +195,65 @@ SYSTEM_PROMPT = (
     "aceitam null nem a palavra \"null\" -- são obrigatórios, sempre um dos valores "
     "fechados listados para cada um.\n"
     "- necessidade_hospitalar, current_status e dia_classificacao descrevem a "
-    "situação de HOJE: baseie-os SEMPRE na evolução marcada como \"EVOLUÇÃO MAIS "
+    "situação de HOJE: baseie-os SEMPRE na evolução marcada como \"EVOLUÇÃO MÉDICA MAIS "
     "RECENTE\", nunca em evoluções anteriores. Se a mais recente contradiz uma "
     "anterior (ex.: paciente melhorou, investigação virou ambulatorial, alta já "
     "orientada), a mais recente vence -- as anteriores são só contexto histórico "
     "de como o caso evoluiu, não a situação atual.\n\n"
+    # LLM-006 (pedido do auditor, DEC-129 seções 1, 2 e 6): fonte priorizada,
+    # localização do censo, papel de cada campo e faixas de sinais vitais.
+    "FONTES DO PRONTUÁRIO (cada evolução vem marcada com a fonte):\n"
+    "- Diagnóstico, trajetória clínica, conduta, contexto e pendências vêm da EVOLUÇÃO "
+    "MÉDICA (inclui intercorrência médica). Use a mais recente sem ignorar eventos "
+    "anteriores relevantes.\n"
+    "- ENFERMAGEM e EQUIPE MULTIPROFISSIONAL são apoio: sinais e eventos objetivos (febre, "
+    "taquicardia, dispneia, dessaturação, alteração neurológica, dor, evacuação, diurese) e "
+    "assuntos da própria área. Nunca substituem a conduta ou a pendência definida pelo médico.\n"
+    "- Interconsulta: evolução posterior ao pedido feita pela especialidade (cargo do autor, "
+    "ex.: \"Médico infectologista\", ou linha iniciada por \"PELA <ESPECIALIDADE>\") indica que "
+    "a avaliação foi feita -- não mantenha \"aguarda avaliação\" dessa especialidade; se o "
+    "especialista pediu algo novo (exame, procedimento, reavaliação), registre essa nova "
+    "pendência específica.\n"
+    "- Anotação de enfermagem sobre punção, contato ou presença de um serviço não é pendência "
+    "quando o atendimento já foi realizado.\n\n"
+    "LOCALIZAÇÃO: unidade e leito são os do bloco LOCALIZAÇÃO ATUAL (censo do GSUS). Não "
+    "descreva o paciente em outro setor ou leito e ignore localização citada em evoluções "
+    "antigas (ex.: \"leito de observação\").\n\n"
+    "O QUE ESCREVER EM CADA CAMPO (nunca repita o mesmo diagnóstico ou justificativa em mais "
+    "de um campo):\n"
+    "- clinical_context: 2 a 4 linhas. Inclua, quando relevante: diagnóstico ou hipótese "
+    "principal, gravidade atual, suporte ventilatório ou hemodinâmico, cirurgia ou "
+    "procedimento relevante, complicação, resposta ao tratamento, barreira à alta. NÃO "
+    "inclua: acesso venoso periférico sem complicação, monitorização de rotina, \"recebe "
+    "cuidados de enfermagem\", dispositivos sem impacto clínico, repetição da história "
+    "completa, sinais vitais normais.\n"
+    "- necessidade_hospitalar_justificativa: uma frase sobre o que exige cuidado hospitalar hoje.\n"
+    "- objetivo_terapeutico: a meta clínica para a alta. proximo_passo: a próxima ação "
+    "concreta, diferente do objetivo.\n"
+    "- dia_classificacao: VERDE quando a evolução de hoje registra ação ou progresso que "
+    "aproxima o paciente da alta; VERMELHO quando a ação necessária não ocorreu ou nada "
+    "agregou valor. dia_causa: uma frase curta, sem repetir a descrição da pendência.\n"
+    "- Cuidado de rotina não é pendência (manutenção de acesso venoso periférico, "
+    "monitorização, curativo de rotina).\n\n"
+    "SINAIS VITAIS -- faixas de normalidade do adulto: " + vital_ranges.prompt_block() + ". "
+    "Valor dentro da faixa nunca é descrito como alterado (ex.: FR de 18 irpm é normal, não "
+    "\"baixa\"). Paciente com oxigênio ou suporte ventilatório, ou de setor pediátrico/"
+    "neonatal: não classifique o valor; só cite a classificação que a própria evolução "
+    "escreveu.\n\n"
     "CATEGORIAS E SUBTIPOS VÁLIDOS:\n" + _taxonomy_prompt_block() + "\n\n"
     "Responda SOMENTE com um objeto JSON no formato:\n"
-    '{"clinical_context": "2 a 4 linhas: motivo da internação + problema atual + '
-    'intervenções já realizadas", '
-    '"current_status": "situação clínica atual, resumida", '
+    '{"clinical_context": "2 a 4 linhas: motivo da internação, problema principal atual, '
+    'intervenções relevantes e o que mantém a internação", '
+    '"current_status": "uma frase: situação clínica de hoje", '
     '"necessidade_hospitalar": "SIM|PROVAVELMENTE_SIM|INCERTO|POSSIVELMENTE_NAO|NAO_IDENTIFICADA", '
-    '"necessidade_hospitalar_justificativa": "string com evidência", '
-    '"objetivo_terapeutico": "o que precisa ser resolvido/atingido antes da alta", '
-    '"proximo_passo": "próximo marco necessário para a alta", '
+    '"necessidade_hospitalar_justificativa": "uma frase com evidência, sem repetir o contexto", '
+    '"objetivo_terapeutico": "meta clínica para a alta", '
+    '"proximo_passo": "próxima ação concreta para a alta", '
     '"origem_internacao": "string (ex.: emergência, eletiva, transferência) ou null", '
     '"edd_data": "AAAA-MM-DD ou null", '
     '"edd_status": "REGISTRADA|NAO_REGISTRADA|VENCIDA", '
     '"dia_classificacao": "VERDE|VERMELHO", '
-    '"dia_causa": "string ou null", '
+    '"dia_causa": "frase curta ou null", '
     '"pending_items": [{"category": "string", "subcategory": "string ou null", '
     '"description": "string", "evidence": "string", "evidence_date": "string ou null", '
     '"origin": "INTERNA|EXTERNA ou null", "is_inferred": false, '
@@ -232,6 +274,7 @@ def build_prompt(
     previous_state: dict | None,
     new_notes: list[StructuredNote],
     active_pending_items: list[dict] | None = None,
+    patient_context: dict | None = None,
 ) -> str:
     """Monta o prompt a partir do incremento -- nunca reenvia o histórico
     completo desnecessariamente (RF-08).
@@ -239,8 +282,28 @@ def build_prompt(
     `active_pending_items` (pendências já registradas, ainda não resolvidas)
     é necessário para o LLM conseguir dizer se uma pendência antiga foi
     resolvida pelas evoluções novas -- sem isso ele só veria o texto livre
-    de `current_status`, não a lista estruturada do que está pendente."""
+    de `current_status`, não a lista estruturada do que está pendente.
+
+    `patient_context` (LLM-006): unidade, leito e data de admissão do censo
+    -- fonte de verdade da localização (caso de aceitação 1 do auditor)."""
     lines = []
+    if patient_context:
+        unit = patient_context.get("unit") or "não informada"
+        bed = patient_context.get("bed") or "não informado"
+        admission = patient_context.get("admission_date") or "não informada"
+        lines.append(
+            f"LOCALIZAÇÃO ATUAL (censo do GSUS -- fonte de verdade): unidade {unit}; leito {bed}; "
+            f"internado desde {admission}."
+        )
+        population = vital_ranges.population_for_unit(patient_context.get("unit"))
+        if population == vital_ranges.POPULATION_PEDIATRIC:
+            lines.append("Setor pediátrico/neonatal: não classifique sinais vitais pelas faixas de adulto.")
+        elif population == vital_ranges.POPULATION_OBSTETRIC:
+            lines.append(
+                "Setor obstétrico: gestação muda as referências (e há valores fetais); não classifique "
+                "sinais vitais pelas faixas gerais de adulto."
+            )
+        lines.append("")
     if previous_state:
         lines.append("CONTEXTO CLÍNICO ANTERIOR:")
         lines.append(previous_state.get("clinical_context") or "(nenhum)")
@@ -264,14 +327,32 @@ def build_prompt(
     # Achado real 2026-08-24 (DEC-058): o LLM justificou necessidade_hospitalar
     # citando uma evolução ANTIGA, ignorando que a mais recente já indicava alta
     # -- não bastava o texto ter a data, precisava de um marcador explícito.
-    most_recent = most_recent_note(new_notes)
+    # LLM-006 (pedido do auditor, DEC-129 seção 2): o marcador vai pra
+    # evolução MÉDICA mais recente -- antes ia pra qualquer uma, e uma
+    # anotação de enfermagem posterior virava a "situação de hoje".
+    most_recent_physician = most_recent_note([n for n in new_notes if is_physician(n.source_type)])
+    if most_recent_physician is not None:
+        marked = most_recent_physician
+        marker_text = (
+            " *** EVOLUÇÃO MÉDICA MAIS RECENTE -- base para necessidade_hospitalar, "
+            "current_status e dia_classificacao ***"
+        )
+    else:
+        marked = most_recent_note(new_notes)
+        # Neutro: a médica pode existir e só não ter cabido no orçamento.
+        marker_text = (
+            " *** EVOLUÇÃO MAIS RECENTE (nenhuma evolução médica entre as enviadas) -- base para "
+            "necessidade_hospitalar, current_status e dia_classificacao ***"
+        )
 
-    lines.append("EVOLUÇÕES NOVAS DESDE A ÚLTIMA ANÁLISE:")
+    lines.append("EVOLUÇÕES NOVAS DESDE A ÚLTIMA ANÁLISE (ordem cronológica):")
     if not new_notes:
         lines.append("(nenhuma evolução nova)")
-    for note in new_notes:
-        marker = " *** EVOLUÇÃO MAIS RECENTE -- priorize esta sobre as demais para necessidade_hospitalar, current_status e dia_classificacao ***" if note is most_recent else ""
-        header = f"[{note.timestamp or 'sem data'} - {note.specialty or 'sem especialidade'} - {note.source_type or 'sem tipo'}]{marker}"
+    dated = sorted((n for n in new_notes if n.timestamp), key=lambda n: n.timestamp)
+    for note in dated + [n for n in new_notes if not n.timestamp]:
+        marker = marker_text if note is marked else ""
+        role = note.source_type or "cargo não informado"
+        header = f"[{note.timestamp or 'sem data'} - {source_label(note.source_type)} - {role}]{marker}"
         lines.append(header)
         lines.append(note.text)
         lines.append("")
@@ -562,8 +643,9 @@ class LocalLLM:
         previous_state: dict | None,
         new_notes: list[StructuredNote],
         active_pending_items: list[dict] | None = None,
+        patient_context: dict | None = None,
     ) -> dict:
-        base_prompt = build_prompt(previous_state, new_notes, active_pending_items)
+        base_prompt = build_prompt(previous_state, new_notes, active_pending_items, patient_context)
         current_prompt = base_prompt
         last_errors: list[str] = []
 

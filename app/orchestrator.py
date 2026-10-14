@@ -24,6 +24,7 @@ from app.analysis.llm import LLMAnalysisError
 from app.analysis.priority import compute_priority, days_since_admission, hours_elapsed_since, pre_admission_cutoff_iso
 from app.analysis.rules import StructuredNote, apply_all_rules, most_recent_note
 from app.analysis.edd import infer_edd_from_notes
+from app.analysis.sources import classify_source, is_physician
 from app.analysis.taxonomy import CATEGORY_INTERCONSULTA, CATEGORY_PROCEDIMENTO_CIRURGIA, default_origin
 from app.extraction.hashing import compute_note_hash
 from app.extraction.normalizer import (
@@ -72,7 +73,17 @@ LLM_LOOKBACK_DAYS = 14
 # uma eventual tentativa de reparo, sem precisar aumentar `--ctx-size` (mais
 # RAM, risco de repetir a falha de alocação do DEC-092 numa máquina com
 # pouca margem).
-MAX_NOTES_CHARS_FOR_LLM = 9000
+#
+# LLM-006 (achado da revisão adversarial, medido com o /tokenize do
+# llama-server em porta isolada): o prompt v2 (regras do auditor) subiu o
+# system prompt de 5.132 pra 7.921 caracteres (1.585 -> 2.417 tokens). O que
+# a calibração acima garantiu foi o TOTAL "system prompt + notas" (~14.132
+# caracteres); mantido o total, o orçamento das notas cai pra 6.200. Um teste
+# (`test_prompt_and_notes_budget_stay_within_the_calibrated_total`) impede que
+# o próximo aumento do prompt coma essa margem em silêncio.
+CALIBRATED_PROMPT_PLUS_NOTES_CHARS = 5132 + 9000
+MAX_NOTES_CHARS_FOR_LLM = 6200
+TRUNCATION_NOTICE = " [trecho final desta evolução omitido por tamanho]"
 
 # Achado real (auditoria de resiliência 2026-08-28, DEC-087): um
 # `llama-server` com slot de geração preso responde `/health` normalmente
@@ -126,6 +137,7 @@ class AnalysisEngine(Protocol):
         previous_state: dict | None,
         new_notes: list[StructuredNote],
         active_pending_items: list[dict] | None = None,
+        patient_context: dict | None = None,
     ) -> dict: ...
 
 
@@ -545,6 +557,17 @@ def run_once(
                 dashboard_metrics.save_snapshot(repo, run_id)
             except Exception:
                 logger.exception("Falha ao gravar snapshot diário -- execução segue concluída mesmo assim")
+            # LLM-006: quanto os filtros de exibição corrigiram o texto da IA
+            # nesta execução -- medida da aderência do prompt v2, só contagens.
+            try:
+                fixes = dashboard_metrics.count_display_fixes(repo)
+                logger.info(
+                    "Correções de exibição do resumo clínico (LLM-006): %d paciente(s) -- rotina=%d, "
+                    "sinal vital=%d, localização=%d, repetição=%d",
+                    fixes["pacientes"], fixes["rotina"], fixes["sinal_vital"], fixes["localizacao"], fixes["repeticao"],
+                )
+            except Exception:
+                logger.exception("Falha ao contar correções de exibição -- execução segue concluída mesmo assim")
 
         # DIAG-001 (2026-09-03, pedido do usuário): registra, em linguagem
         # simples, o que aconteceu nesta execução -- pra que o auditor (sem
@@ -900,25 +923,78 @@ def _limit_to_recent_window(
     return within, excluded_any
 
 
+def _sort_chronologically(notes: list[StructuredNote]) -> list[StructuredNote]:
+    """Ordem cronológica crescente, por VALOR do horário. Achado da Fase 2
+    (medição só de contagens no banco de dev): a extração do GSUS entrega os
+    dias do MAIS NOVO pro mais antigo (2.641 trocas de dia "pra trás" contra
+    39 "pra frente" na ordem de gravação) -- o corte por tamanho, que
+    supunha ordem crescente, descartava justamente as evoluções mais
+    recentes. Nota sem horário vai pro fim, na ordem em que veio."""
+    dated = sorted((n for n in notes if n.timestamp), key=lambda n: n.timestamp)
+    return dated + [n for n in notes if not n.timestamp]
+
+
 def _limit_to_char_budget(
     notes: list[StructuredNote], max_chars: int
 ) -> tuple[list[StructuredNote], bool]:
     """Segundo corte, por TAMANHO em vez de tempo (RESIL-006) -- roda DEPOIS
-    de `_limit_to_recent_window`. Descarta as notas mais ANTIGAS primeiro
-    (`notes` já vem em ordem cronológica ascendente, ver `Repository.
-    get_notes`/`_process_patient_rules`) até caber no orçamento, ou até
-    sobrar só a mais recente -- nunca devolve lista vazia se havia alguma
-    nota (mesma filosofia de nunca descartar tudo por excesso de cautela,
-    RF-08/RNF, só que aqui o "tudo" seria uma nota só gigante demais; melhor
-    tentar com ela sozinha do que não analisar nada)."""
+    de `_limit_to_recent_window`, sobre notas em ordem cronológica crescente
+    (`_sort_chronologically`). Recência primeiro, como sempre foi, com uma
+    garantia do LLM-006 (pedido do auditor, DEC-129 seção 2): a evolução
+    MÉDICA mais recente entra antes de qualquer outra, se couber -- ela é a
+    base da situação de hoje no prompt. Depois, da mais nova pra mais
+    antiga, entra o que couber; quando uma nota de uma fonte (médica ou
+    demais) não cabe, as mais antigas DESSA fonte também ficam de fora --
+    sem buraco no meio da linha do tempo. Nunca devolve lista vazia se havia
+    alguma nota (a médica mais recente, se houver, vai sozinha) -- melhor
+    tentar com ela do que não analisar nada (RF-08/RNF). Devolve em ordem
+    cronológica. (Achado da revisão adversarial: uma reserva fixa de 70%
+    pras médicas descartava a médica mais recente quando ela era grande e o
+    evento de enfermagem de hoje em troca de médicas de 10 dias atrás.)"""
     total = sum(len(note.text) for note in notes)
-    if total <= max_chars or len(notes) <= 1:
+    if total <= max_chars:
         return notes, False
 
-    within = list(notes)
-    while len(within) > 1 and sum(len(note.text) for note in within) > max_chars:
-        within.pop(0)
-    return within, True
+    def truncated(note: StructuredNote) -> StructuredNote:
+        if len(note.text) <= max_chars:
+            return note
+        keep = max_chars - len(TRUNCATION_NOTICE)
+        return StructuredNote(
+            timestamp=note.timestamp, specialty=note.specialty, source_type=note.source_type,
+            text=note.text[:keep].rstrip() + TRUNCATION_NOTICE,
+        )
+
+    # Mais nova primeiro; nota sem horário conta como a mais antiga.
+    dated = [(i, n) for i, n in enumerate(notes) if n.timestamp]
+    undated = [(i, n) for i, n in enumerate(notes) if not n.timestamp]
+    newest_first = list(reversed(dated)) + undated
+    chosen: dict[int, StructuredNote] = {}
+    used = 0
+    newest_physician = next(((i, n) for i, n in newest_first if is_physician(n.source_type)), None)
+    if newest_physician is not None:
+        # Achado da 2ª revisão: uma evolução médica maior que o orçamento
+        # sumia e a enfermagem virava a "base de hoje". Vai o começo dela
+        # (diagnóstico descritivo, queixa, exame), com aviso de corte.
+        index, note = newest_physician
+        chosen[index] = truncated(note)
+        used = len(chosen[index].text)
+
+    blocked: set[str] = set()  # fontes cuja próxima nota (mais antiga) não coube
+    for index, note in newest_first:
+        group = classify_source(note.source_type)
+        if index in chosen or group in blocked:
+            continue
+        if used + len(note.text) <= max_chars:
+            chosen[index] = note
+            used += len(note.text)
+        elif note.timestamp and len(note.text) <= max_chars:
+            # Nota que não caberia nem sozinha, ou sem horário, não bloqueia
+            # as mais antigas da mesma fonte.
+            blocked.add(group)
+    if not chosen:
+        index, note = newest_first[0]
+        chosen[index] = truncated(note)
+    return [chosen[i] for i in sorted(chosen)], True
 
 
 def _prepare_notes_for_llm(
@@ -927,12 +1003,42 @@ def _prepare_notes_for_llm(
     """Combina os dois cortes -- por data (DEC-066) e por tamanho
     (RESIL-006) -- na ordem certa (data primeiro, tamanho por cima, já que a
     janela de dias sozinha ainda pode deixar volume grande demais pro
-    contexto do LLM). `window_limited` fica True se QUALQUER um dos dois
-    cortou algo -- mesmo significado de sempre pro relatório (RF-26): esta
-    análise não viu o histórico completo disponível."""
-    by_date, date_limited = _limit_to_recent_window(notes, days)
+    contexto do LLM), sobre as notas já em ordem cronológica. `window_limited`
+    fica True se QUALQUER um dos dois cortou algo -- mesmo significado de
+    sempre pro relatório (RF-26): esta análise não viu o histórico completo
+    disponível."""
+    ordered = _sort_chronologically(notes)
+    by_date, date_limited = _limit_to_recent_window(ordered, days)
     by_size, size_limited = _limit_to_char_budget(by_date, MAX_NOTES_CHARS_FOR_LLM)
     return by_size, date_limited or size_limited
+
+
+def _latest_physician_note(
+    repo: Repository, patient_id: str, new_notes: list[StructuredNote], admission_date: str | None,
+) -> StructuredNote | None:
+    """Evolução MÉDICA mais recente já gravada desta internação (não antes
+    da admissão menos a folga, e dentro da janela do LLM em relação à nota
+    nova mais recente). None se não houver."""
+    cutoff_iso = pre_admission_cutoff_iso(admission_date)
+    newest = most_recent_note(new_notes)
+    window_start = None
+    if newest is not None and newest.timestamp:
+        try:
+            window_start = (datetime.fromisoformat(newest.timestamp) - timedelta(days=LLM_LOOKBACK_DAYS)).isoformat()
+        except ValueError:
+            window_start = None
+    for row in reversed(repo.get_notes(patient_id)):
+        timestamp = row["timestamp"]
+        if not timestamp or not is_physician(row["source_type"]):
+            continue
+        if cutoff_iso and timestamp[:10] < cutoff_iso:
+            return None
+        if window_start and timestamp < window_start:
+            return None
+        return StructuredNote(
+            timestamp=timestamp, specialty=row["specialty"], source_type=row["source_type"], text=row["text"],
+        )
+    return None
 
 
 def _reconstruct_all_notes(repo: Repository, patient_id: str) -> list[StructuredNote]:
@@ -1033,8 +1139,32 @@ def _run_llm_analysis(
     ]
     active_rows = [r for r in all_active_rows if r["source"] == "LLM"]
 
+    # LLM-006 (pedido do auditor, DEC-129, caso 1): unidade e leito do censo
+    # entram no prompt como fonte de verdade -- antes o modelo deduzia a
+    # localização de evolução antiga ("leito de observação" pra paciente na UTI).
+    patient_row = repo.get_patient_by_record_number(patient_id)
+    patient_context = (
+        {"unit": patient_row["unit"], "bed": patient_row["bed"], "admission_date": patient_row["admission_date"]}
+        if patient_row is not None else None
+    )
+
+    # Achado da 2ª revisão do LLM-006: a execução da noite só manda o que é
+    # NOVO -- se a evolução médica do dia já foi analisada mais cedo (ou no
+    # fim de semana, quando só a enfermagem escreve), a anotação de
+    # enfermagem virava a "base de hoje". Junta a evolução médica mais
+    # recente desta internação como referência, dentro do mesmo orçamento.
+    notes_for_llm = new_notes
+    if new_notes and not any(is_physician(n.source_type) for n in new_notes):
+        admission_date = patient_row["admission_date"] if patient_row is not None else None
+        reference = _latest_physician_note(repo, patient_id, new_notes, admission_date)
+        if reference is not None:
+            notes_for_llm, cut = _limit_to_char_budget(
+                _sort_chronologically([reference] + new_notes), MAX_NOTES_CHARS_FOR_LLM,
+            )
+            window_limited = window_limited or cut
+
     try:
-        analysis = llm.analyze_patient(previous_state, new_notes, active_pending_items)
+        analysis = llm.analyze_patient(previous_state, notes_for_llm, active_pending_items, patient_context=patient_context)
     except LLMAnalysisError:
         logger.exception(
             "LLM_ANALYSIS_ERROR para paciente %s -- mantendo estado anterior, sem inventar resultado",
@@ -1047,9 +1177,10 @@ def _run_llm_analysis(
 
     # especialidade_responsavel vem de metadado JÁ estruturado (o cargo do
     # profissional na nota, extraído pelo parser -- não pedimos pro LLM
-    # adivinhar algo que já temos de forma confiável, RF-07/RF-08). Usa a
-    # nota mais recente -- mesmo critério de recência do prompt (DEC-058).
-    last_note = most_recent_note(new_notes)
+    # adivinhar algo que já temos de forma confiável, RF-07/RF-08). Bug
+    # corrigido no LLM-006: lia `specialty`, que o parser nunca preenche --
+    # ficava sempre NULL. Agora: cargo da evolução MÉDICA mais recente.
+    last_physician_note = most_recent_note([n for n in notes_for_llm if is_physician(n.source_type)])
     # DEC-119: o contrato pede "AAAA-MM-DD", mas o modelo às vezes copia
     # "DD/MM/AAAA" da evolução -- `is_edd_overdue` só lê ISO.
     edd_data = normalize_iso_date(analysis.get("edd_data"))
@@ -1065,7 +1196,7 @@ def _run_llm_analysis(
             edd_data, edd_status, edd_inferred = inferred, "REGISTRADA", True
     repo.save_patient_state(
         patient_id, analysis["clinical_context"], analysis["current_status"],
-        especialidade_responsavel=last_note.specialty if last_note else None,
+        especialidade_responsavel=last_physician_note.source_type if last_physician_note else None,
         origem_internacao=analysis.get("origem_internacao"),
         necessidade_hospitalar=analysis["necessidade_hospitalar"],
         necessidade_hospitalar_justificativa=analysis["necessidade_hospitalar_justificativa"],
