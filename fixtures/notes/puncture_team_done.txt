@@ -1,0 +1,5 @@
+20/08/2026 08:00 - Profissional Teste Um (Medico clinico)
+Paciente com rede venosa dificil. Acionada equipe de puncao para avaliacao de puncao venosa.
+
+20/08/2026 16:00 - Profissional Teste Quatro (Enfermeiro)
+Equipe de puncao: atendimento realizado com sucesso.

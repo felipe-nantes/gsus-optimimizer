@@ -1,0 +1,10 @@
+20/08/2026 08:00 - Profissional Teste Um (Medico clinico)
+Lesao renal aguda em investigacao. Solicito avaliacao da nefrologia.
+
+21/08/2026 10:00 - Profissional Teste Dois (Medico residente)
+Avaliacao a pedido da clinica medica.
+PELA NEFROLOGIA
+Sem indicacao de dialise no momento. Solicito ultrassom de rins e vias urinarias.
+
+21/08/2026 15:00 - Profissional Teste Um (Medico clinico)
+Paciente estavel. Mantem hidratacao conforme nefrologia.
