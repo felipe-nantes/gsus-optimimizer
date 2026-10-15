@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import uuid
 from pathlib import Path
 
 from app.analysis.priority import pre_admission_cutoff_iso
@@ -63,7 +64,7 @@ def _purge_rule_items_before_admission(conn: sqlite3.Connection) -> int:
     rows = conn.execute(
         "SELECT pi.pending_id AS pending_id, pi.evidence_date AS evidence_date, p.admission_date AS admission_date "
         "FROM pending_items pi JOIN patients p ON p.patient_id = pi.patient_id "
-        "WHERE pi.source = 'RULE' AND pi.status = 'ACTIVE' AND pi.evidence_date IS NOT NULL"
+        "WHERE pi.source = 'RULE' AND pi.status IN ('ACTIVE', 'IN_REVIEW') AND pi.evidence_date IS NOT NULL"
     ).fetchall()
     doomed = []
     for row in rows:
@@ -73,6 +74,7 @@ def _purge_rule_items_before_admission(conn: sqlite3.Connection) -> int:
             doomed.append(row["pending_id"])
     for pending_id in doomed:
         conn.execute("DELETE FROM pending_item_evidence WHERE pending_id = ?", (pending_id,))
+        conn.execute("DELETE FROM pending_item_events WHERE pending_id = ?", (pending_id,))
         conn.execute("DELETE FROM pending_items WHERE pending_id = ?", (pending_id,))
     if doomed:
         logger.warning(
@@ -177,6 +179,24 @@ CREATE TABLE IF NOT EXISTS pending_items (
     source         TEXT
 );
 
+-- PEND-001 (pedido do auditor, DEC-129 seções 3 e 5): histórico de cada
+-- pendência, só acréscimo -- quem mudou o estado, quando, de qual pra qual,
+-- com que evidência ou justificativa. Nunca apagado nem editado: o registro
+-- produzido pelo sistema continua consultável mesmo depois de o auditor
+-- concluir ou reabrir o item (RF-30).
+CREATE TABLE IF NOT EXISTS pending_item_events (
+    event_id       TEXT PRIMARY KEY,
+    pending_id     TEXT NOT NULL REFERENCES pending_items(pending_id),
+    created_at     TEXT NOT NULL,
+    event_type     TEXT NOT NULL,
+    from_status    TEXT,
+    to_status      TEXT,
+    actor          TEXT NOT NULL,
+    evidence       TEXT,
+    evidence_date  TEXT,
+    note           TEXT
+);
+
 -- Evidências adicionais de uma pendência já registrada (ex.: "solicitado em
 -- 19/08 e reiterado em 20 e 21/08" -- seção 15 da orientação). A primeira
 -- evidência continua em `pending_items.evidence`/`evidence_date`.
@@ -244,13 +264,18 @@ CREATE INDEX IF NOT EXISTS idx_notes_patient ON notes(patient_id);
 CREATE INDEX IF NOT EXISTS idx_queue_run_status ON processing_queue(run_id, status);
 CREATE INDEX IF NOT EXISTS idx_pending_patient_status ON pending_items(patient_id, status);
 CREATE INDEX IF NOT EXISTS idx_pending_evidence_pending ON pending_item_evidence(pending_id);
+CREATE INDEX IF NOT EXISTS idx_pending_events_pending ON pending_item_events(pending_id);
 CREATE INDEX IF NOT EXISTS idx_snapshot_created ON daily_snapshot(created_at);
 CREATE INDEX IF NOT EXISTS idx_snapshot_category_snapshot ON daily_snapshot_category(snapshot_id);
 CREATE INDEX IF NOT EXISTS idx_run_diagnostics_created ON run_diagnostics(created_at);
 """
 
 VALID_QUEUE_STATUSES = {"PENDING", "PROCESSING", "DONE", "ERROR", "NO_ADMISSION", "AWAITING_NOTES"}
-VALID_PENDING_STATUSES = {"ACTIVE", "RESOLVED", "UNKNOWN"}
+# PEND-001 (DEC-129): IN_REVIEW = "Em verificação pelo auditor" (aberta, mas
+# sem evidência suficiente pra decidir); CANCELLED = a equipe retirou a
+# indicação. RESOLVED cobre "Concluída automaticamente" e "Concluída pelo
+# auditor" -- quem concluiu fica em `resolution_source`.
+VALID_PENDING_STATUSES = {"ACTIVE", "IN_REVIEW", "RESOLVED", "CANCELLED", "UNKNOWN"}
 
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
@@ -278,6 +303,53 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     _migrate(conn)
     conn.commit()
     return conn
+
+
+def _backfill_pending_history(conn: sqlite3.Connection) -> None:
+    """PEND-001: pendência gravada antes do histórico existir ganha os eventos
+    que dá pra reconstruir (criação; conclusão, se já resolvida) e
+    `resolution_source='LEGADO'` -- idempotente: só toca o que ainda não tem
+    evento/origem. Roda em todo `init_db` -- inclusive o da tela, a cada
+    60 s, enquanto uma execução escreve em outra conexão: por isso só ESCREVE
+    quando há algo a fazer (revisão adversarial: o UPDATE incondicional
+    pegava a trava de escrita toda vez e a tela travava 30 s)."""
+    if conn.execute(
+        "SELECT 1 FROM pending_items WHERE status = 'RESOLVED' AND resolution_source IS NULL LIMIT 1"
+    ).fetchone():
+        conn.execute(
+            "UPDATE pending_items SET resolution_source = 'LEGADO' "
+            "WHERE status = 'RESOLVED' AND resolution_source IS NULL"
+        )
+    missing = conn.execute(
+        "SELECT pending_id, created_at, status, resolved_at, source FROM pending_items pi "
+        "WHERE NOT EXISTS (SELECT 1 FROM pending_item_events e WHERE e.pending_id = pi.pending_id)"
+    ).fetchall()
+    for row in missing:
+        conn.execute(
+            "INSERT INTO pending_item_events (event_id, pending_id, created_at, event_type, from_status, to_status, actor) "
+            "VALUES (?, ?, ?, 'CRIADA', NULL, 'ACTIVE', ?)",
+            (str(uuid.uuid4()), row["pending_id"], row["created_at"], row["source"] or "SISTEMA"),
+        )
+        if row["status"] == "RESOLVED" and row["resolved_at"]:
+            conn.execute(
+                "INSERT INTO pending_item_events (event_id, pending_id, created_at, event_type, from_status, to_status, actor, note) "
+                "VALUES (?, ?, ?, 'CONCLUIDA', 'ACTIVE', 'RESOLVED', 'LEGADO', ?)",
+                (str(uuid.uuid4()), row["pending_id"], row["resolved_at"],
+                 "Concluída antes do histórico existir (versão anterior à 1.6.0)."),
+            )
+    # `closed_at` (hora em que o sistema encerrou) de quem foi encerrado antes
+    # dessa coluna existir: o evento de conclusão, ou `resolved_at`.
+    closed_without_time = (
+        "status IN ('RESOLVED', 'CANCELLED') AND closed_at IS NULL AND (resolved_at IS NOT NULL OR EXISTS ("
+        "SELECT 1 FROM pending_item_events e WHERE e.pending_id = pending_items.pending_id "
+        "AND e.event_type IN ('CONCLUIDA', 'CANCELADA')))"
+    )
+    if conn.execute(f"SELECT 1 FROM pending_items WHERE {closed_without_time} LIMIT 1").fetchone():
+        conn.execute(
+            "UPDATE pending_items SET closed_at = COALESCE((SELECT MAX(e.created_at) FROM pending_item_events e "
+            "WHERE e.pending_id = pending_items.pending_id AND e.event_type IN ('CONCLUIDA', 'CANCELADA')), "
+            f"resolved_at) WHERE {closed_without_time}"
+        )
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -314,12 +386,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "subcategory": "TEXT", "origin": "TEXT", "priority": "TEXT", "confidence": "TEXT",
         "is_inferred": "INTEGER NOT NULL DEFAULT 0", "flow_status": "TEXT",
         # DEC-062: distingue pendência criada por regra determinística (RULES-001)
-        # de pendência do LLM -- sem isso, resolver automaticamente uma pendência
-        # do LLM não reconfirmada also resolvia (errado) pendências de regra, que
-        # têm ciclo de vida próprio (reavaliadas a cada rodada de apply_all_rules).
-        # NULL em linha já existente (banco anterior a este campo) = nunca entra
-        # na reconciliação automática -- mais seguro que assumir a origem.
+        # de pendência do LLM. NULL em linha já existente = banco anterior a
+        # este campo. Desde o PEND-001 (DEC-129) pendências de qualquer fonte
+        # (inclusive NULL) ganham `alvo` pelo backfill do orchestrator, casam
+        # por (categoria, alvo) e são avaliadas pelo detector (a IA vê no
+        # máximo 12 por análise). A fonte ainda decide a poda do DEC-119 (só
+        # REGRA), a interconsulta de regra antiga sem especialidade (vai para
+        # verificação) e o casamento antigo por categoria+subtipo (só LLM).
         "source": "TEXT",
+        # PEND-001 (DEC-129): o que a pendência espera (especialidade, exame,
+        # procedimento -- normalizado, chave de casamento entre execuções) e
+        # como foi encerrada (quem, com que evidência).
+        "alvo": "TEXT",
+        "resolution_source": "TEXT",
+        "resolution_evidence": "TEXT",
+        "resolution_evidence_date": "TEXT",
+        "resolved_by": "TEXT",
+        # Hora em que o SISTEMA encerrou (UTC). `resolved_at` é a data da
+        # evidência (tempo de resolução fiel ao prontuário); o bloco
+        # "Concluídas recentemente" precisa saber quando o item SAIU da lista.
+        "closed_at": "TEXT",
     }
     existing_pending_columns = {row["name"] for row in conn.execute("PRAGMA table_info(pending_items)")}
     for column, sql_type in pending_new_columns.items():
@@ -330,3 +416,5 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # Primeiro normaliza as datas (a poda compara texto ISO), depois poda.
     _normalize_stored_dates(conn)
     _purge_rule_items_before_admission(conn)
+    # PEND-001: depois da poda -- não cria histórico de item que acabou de sair.
+    _backfill_pending_history(conn)

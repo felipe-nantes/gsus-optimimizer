@@ -39,6 +39,34 @@ QUEUE_AWAITING_NOTES = "AWAITING_NOTES"
 PENDING_ACTIVE = "ACTIVE"
 PENDING_RESOLVED = "RESOLVED"
 PENDING_UNKNOWN = "UNKNOWN"
+# PEND-001 (pedido do auditor, DEC-129 seção 3): "Em verificação pelo auditor"
+# -- informação incompleta ou conflitante: a IA disse INCERTA; a IA disse
+# concluída/cancelada com trecho que não comprova; o detector achou "exame
+# realizado" sem resultado, resposta relatada por outra equipe ou evidência
+# posterior conflitante; interconsulta de regra antiga sem especialidade.
+# Continua ABERTA (no censo, no relatório), só sinalizada pra conferência.
+# Decisão OMITIDA pela IA não muda nada (DEC-129 decisão 3).
+PENDING_IN_REVIEW = "IN_REVIEW"
+# A equipe retirou a indicação (ex.: "suspensa a interconsulta") -- encerrada,
+# mas não conta como resolvida no tempo mediano de resolução.
+PENDING_CANCELLED = "CANCELLED"
+OPEN_PENDING_STATUSES = (PENDING_ACTIVE, PENDING_IN_REVIEW)
+CLOSED_PENDING_STATUSES = (PENDING_RESOLVED, PENDING_CANCELLED)
+
+# Quem encerrou a pendência (`resolution_source`) -- o relatório diferencia
+# "Concluída automaticamente" (IA/REGRA/DETECTOR) de "Concluída pelo auditor".
+RESOLUTION_LLM = "IA"
+RESOLUTION_RULE = "REGRA"
+RESOLUTION_DETECTOR = "DETECTOR"
+RESOLUTION_AUDITOR = "AUDITOR"
+RESOLUTION_LEGACY = "LEGADO"  # encerrada antes do histórico existir (< 1.6.0)
+
+# Tipos de evento do histórico (`pending_item_events`).
+EVENT_CREATED = "CRIADA"
+EVENT_RESOLVED = "CONCLUIDA"
+EVENT_CANCELLED = "CANCELADA"
+EVENT_IN_REVIEW = "EM_VERIFICACAO"
+EVENT_REACTIVATED = "REATIVADA"
 
 MAX_QUEUE_ATTEMPTS = 3
 
@@ -599,6 +627,7 @@ class Repository:
         is_inferred: bool = False,
         flow_status: str | None = None,
         source: str | None = None,
+        alvo: str | None = None,
     ) -> str:
         """Campos a partir de `subcategory` são do modelo de auditoria
         concorrente (RF-22 a RF-25, DEC-057) -- todos opcionais para que
@@ -607,40 +636,99 @@ class Repository:
         -- o relatório sempre recalcula na leitura (tempo decorrido muda
         mesmo sem nova execução), ver app/analysis/priority.py.
 
-        `source` ("RULE" ou "LLM", DEC-062) marca quem criou a pendência --
-        só pendências "LLM" participam da reconciliação automática em
-        `orchestrator._run_llm_analysis` (reiteração/resolução); pendências
-        de regra têm ciclo de vida próprio, reavaliadas a cada rodada de
-        `apply_all_rules`."""
+        `source` ("RULE" ou "LLM", DEC-062; NULL nas gravadas antes disso)
+        marca quem CRIOU a pendência. Desde o PEND-001 (DEC-129) as regras
+        apenas criam; toda pendência aberta desta internação, de qualquer
+        fonte, casa por (categoria, alvo) com as reemissões e é avaliada pelo
+        detector; a IA recebe no máximo 12 por análise (em verificação
+        primeiro, depois as ativas mais recentes) -- as outras mantêm o
+        estado. Quem encerra é o detector, uma decisão da IA com evidência
+        verificada ou o auditor. A fonte ainda decide três coisas: a poda do
+        DEC-119 (só pendência de REGRA anterior à internação é apagada), a
+        interconsulta de regra ANTIGA sem especialidade reconhecível (vai para
+        verificação no backfill) e o casamento antigo por categoria+subtipo
+        (só entre pendências da IA sem alvo canônico).
+
+        `alvo` (PEND-001) é o que a pendência espera, já normalizado
+        (especialidade canônica, exame, procedimento) -- chave de casamento
+        entre execuções e entre fontes (regra x IA)."""
         pending_id = str(uuid.uuid4())
+        created_at = _now()
         self.conn.execute(
             "INSERT INTO pending_items ("
             "  pending_id, patient_id, category, subcategory, description,"
             "  evidence, evidence_date, origin, priority, confidence, is_inferred,"
-            "  flow_status, status, created_at, source"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  flow_status, status, created_at, source, alvo"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 pending_id, patient_id, category, subcategory, description,
                 evidence, evidence_date, origin, priority, confidence, int(is_inferred),
-                flow_status, PENDING_ACTIVE, _now(), source,
+                flow_status, PENDING_ACTIVE, created_at, source, alvo,
             ),
+        )
+        self._insert_event(
+            pending_id, EVENT_CREATED, None, PENDING_ACTIVE, source or "SISTEMA",
+            evidence=evidence, evidence_date=evidence_date, created_at=created_at,
         )
         self.conn.commit()
         return pending_id
 
-    def add_pending_item_evidence(self, pending_id: str, timestamp: str | None, text: str) -> str:
+    def _insert_event(
+        self,
+        pending_id: str,
+        event_type: str,
+        from_status: str | None,
+        to_status: str | None,
+        actor: str,
+        *,
+        evidence: str | None = None,
+        evidence_date: str | None = None,
+        note: str | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        """Sem commit -- quem chama grava o evento na MESMA transação da
+        mudança de estado (nunca estado novo sem histórico, nem o contrário)."""
+        self.conn.execute(
+            "INSERT INTO pending_item_events (event_id, pending_id, created_at, event_type, "
+            "from_status, to_status, actor, evidence, evidence_date, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()), pending_id, created_at or _now(), event_type,
+                from_status, to_status, actor, evidence, evidence_date, note,
+            ),
+        )
+
+    def _open_status(self, pending_id: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT status FROM pending_items WHERE pending_id = ?", (pending_id,)
+        ).fetchone()
+        if row is None or row["status"] not in OPEN_PENDING_STATUSES:
+            return None
+        return row["status"]
+
+    def add_pending_item_evidence(self, pending_id: str, timestamp: str | None, text: str) -> str | None:
         """Evidência ADICIONAL de uma pendência já registrada (ex.:
         reiteração -- "solicitado em 19/08 e reiterado em 20 e 21/08",
         seção 15 da orientação técnica). A primeira evidência já fica em
-        `pending_items.evidence`/`evidence_date`."""
+        `pending_items.evidence`/`evidence_date`.
+
+        Idempotente (revisão adversarial do PEND-001): a mesma evidência
+        (data + texto) não é gravada de novo -- a evolução médica de
+        referência é reenviada toda noite só de enfermagem -- e pendência que
+        deixou de existir no meio da análise (poda do DEC-119 rodando em
+        outra conexão) não derruba o paciente com erro de chave estrangeira.
+        Devolve None quando nada foi gravado."""
         evidence_id = str(uuid.uuid4())
-        self.conn.execute(
+        cursor = self.conn.execute(
             "INSERT INTO pending_item_evidence (evidence_id, pending_id, timestamp, text, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (evidence_id, pending_id, timestamp, text, _now()),
+            "SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM pending_items WHERE pending_id = ?) "
+            "AND NOT EXISTS (SELECT 1 FROM pending_item_evidence WHERE pending_id = ? AND timestamp IS ? AND text = ?) "
+            "AND NOT EXISTS (SELECT 1 FROM pending_items WHERE pending_id = ? AND evidence = ? AND evidence_date IS ?)",
+            (evidence_id, pending_id, timestamp, text, _now(), pending_id, pending_id, timestamp, text,
+             pending_id, text, timestamp),
         )
         self.conn.commit()
-        return evidence_id
+        return evidence_id if cursor.rowcount == 1 else None
 
     def get_pending_item_evidence(self, pending_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -649,17 +737,214 @@ class Repository:
         ).fetchall()
 
     def get_active_pending_items(self, patient_id: str) -> list[sqlite3.Row]:
+        """Pendências ABERTAS do paciente -- ativas e "em verificação pelo
+        auditor" (PEND-001): as duas continuam no relatório e no censo, e
+        as duas entram na reconciliação da próxima análise."""
         return self.conn.execute(
-            "SELECT * FROM pending_items WHERE patient_id = ? AND status = ?",
-            (patient_id, PENDING_ACTIVE),
+            "SELECT * FROM pending_items WHERE patient_id = ? AND status IN (?, ?) ORDER BY created_at",
+            (patient_id, *OPEN_PENDING_STATUSES),
         ).fetchall()
 
-    def resolve_pending_item(self, pending_id: str) -> None:
-        self.conn.execute(
-            "UPDATE pending_items SET status = ?, resolved_at = ? WHERE pending_id = ?",
-            (PENDING_RESOLVED, _now(), pending_id),
+    def get_patient_pending_items(self, patient_id: str) -> list[sqlite3.Row]:
+        """Todas as pendências do paciente, abertas ou encerradas, mais antiga
+        primeiro -- o detector de PEND-001 precisa das encerradas pra não
+        recriar o que já foi concluído."""
+        return self.conn.execute(
+            "SELECT * FROM pending_items WHERE patient_id = ? ORDER BY created_at",
+            (patient_id,),
+        ).fetchall()
+
+    def _close_pending_item(
+        self,
+        pending_id: str,
+        to_status: str,
+        event_type: str,
+        *,
+        source: str | None,
+        evidence: str | None,
+        evidence_date: str | None,
+        resolved_by: str | None,
+        resolved_at: str | None,
+        note: str | None,
+    ) -> bool:
+        from_status = self._open_status(pending_id)
+        if from_status is None:
+            return False
+        now = _now()
+        cursor = self.conn.execute(
+            "UPDATE pending_items SET status = ?, resolved_at = ?, closed_at = ?, resolution_source = ?, "
+            "resolution_evidence = ?, resolution_evidence_date = ?, resolved_by = ? "
+            "WHERE pending_id = ? AND status = ?",
+            (to_status, resolved_at or now, now, source, evidence, evidence_date, resolved_by, pending_id, from_status),
+        )
+        if cursor.rowcount != 1:
+            self.conn.commit()  # encerra a transação implícita: UPDATE sem efeito também segura a trava
+            return False
+        self._insert_event(
+            pending_id, event_type, from_status, to_status, resolved_by or source or "SISTEMA",
+            evidence=evidence, evidence_date=evidence_date, note=note,
         )
         self.conn.commit()
+        return True
+
+    def resolve_pending_item(
+        self,
+        pending_id: str,
+        *,
+        source: str | None = None,
+        evidence: str | None = None,
+        evidence_date: str | None = None,
+        resolved_by: str | None = None,
+        resolved_at: str | None = None,
+        note: str | None = None,
+    ) -> bool:
+        """Conclui uma pendência ABERTA (ativa ou em verificação) e registra o
+        evento. Devolve False sem tocar em nada se ela já estava encerrada --
+        nunca reescreve quem concluiu nem quando (PEND-001).
+
+        `resolved_at` (ISO UTC) é a data da EVIDÊNCIA de conclusão quando ela
+        é conhecida (ex.: detector achou a evolução do especialista) -- o
+        tempo mediano de resolução fica fiel ao prontuário, não ao horário
+        em que a ferramenta rodou. Sem ela, agora."""
+        return self._close_pending_item(
+            pending_id, PENDING_RESOLVED, EVENT_RESOLVED,
+            source=source, evidence=evidence, evidence_date=evidence_date,
+            resolved_by=resolved_by, resolved_at=resolved_at, note=note,
+        )
+
+    def cancel_pending_item(
+        self,
+        pending_id: str,
+        *,
+        source: str | None = None,
+        evidence: str | None = None,
+        evidence_date: str | None = None,
+        resolved_by: str | None = None,
+        resolved_at: str | None = None,
+        note: str | None = None,
+    ) -> bool:
+        """A equipe retirou a indicação -- encerrada como CANCELADA (fora do
+        tempo mediano de resolução). Mesmas garantias de `resolve_pending_item`."""
+        return self._close_pending_item(
+            pending_id, PENDING_CANCELLED, EVENT_CANCELLED,
+            source=source, evidence=evidence, evidence_date=evidence_date,
+            resolved_by=resolved_by, resolved_at=resolved_at, note=note,
+        )
+
+    def set_pending_in_review(
+        self,
+        pending_id: str,
+        *,
+        actor: str,
+        note: str | None = None,
+        evidence: str | None = None,
+        evidence_date: str | None = None,
+    ) -> bool:
+        """ATIVA -> EM VERIFICAÇÃO PELO AUDITOR. Só a partir de ATIVA: item já
+        em verificação não ganha evento repetido a cada execução."""
+        return self._move_status(
+            pending_id, PENDING_ACTIVE, PENDING_IN_REVIEW, EVENT_IN_REVIEW, actor,
+            evidence=evidence, evidence_date=evidence_date, note=note,
+        )
+
+    def _move_status(
+        self,
+        pending_id: str,
+        from_status: str,
+        to_status: str,
+        event_type: str,
+        actor: str,
+        *,
+        evidence: str | None,
+        evidence_date: str | None,
+        note: str | None,
+    ) -> bool:
+        """Troca de estado condicional + evento, numa transação. Achado da
+        revisão adversarial do PEND-001: um UPDATE que não muda nada (item
+        já em verificação, o caso comum toda noite) ABRE a transação
+        implícita do sqlite3 e segura a trava de escrita até o próximo
+        commit dessa conexão -- a outra fase da execução e a tela esperavam
+        30 s e falhavam com "database is locked". Por isso: lê antes (SELECT
+        não trava) e, se mesmo assim o UPDATE não pegar, encerra a transação."""
+        current = self.conn.execute(
+            "SELECT status FROM pending_items WHERE pending_id = ?", (pending_id,)
+        ).fetchone()
+        if current is None or current["status"] != from_status:
+            return False
+        cursor = self.conn.execute(
+            "UPDATE pending_items SET status = ? WHERE pending_id = ? AND status = ?",
+            (to_status, pending_id, from_status),
+        )
+        if cursor.rowcount != 1:
+            self.conn.commit()
+            return False
+        self._insert_event(
+            pending_id, event_type, from_status, to_status, actor,
+            evidence=evidence, evidence_date=evidence_date, note=note,
+        )
+        self.conn.commit()
+        return True
+
+    def reactivate_pending_item(
+        self,
+        pending_id: str,
+        *,
+        actor: str,
+        evidence: str | None = None,
+        evidence_date: str | None = None,
+        note: str | None = None,
+    ) -> bool:
+        """EM VERIFICAÇÃO -> ATIVA, quando uma análise nova volta a confirmar
+        que o item segue pendente."""
+        return self._move_status(
+            pending_id, PENDING_IN_REVIEW, PENDING_ACTIVE, EVENT_REACTIVATED, actor,
+            evidence=evidence, evidence_date=evidence_date, note=note,
+        )
+
+    def set_pending_alvo(self, pending_id: str, alvo: str) -> None:
+        """Preenche o `alvo` de pendência gravada antes do PEND-001 (ou sem
+        alvo reconhecível na época) -- só quando ainda está vazio."""
+        self.conn.execute(
+            "UPDATE pending_items SET alvo = ? WHERE pending_id = ? AND alvo IS NULL",
+            (alvo, pending_id),
+        )
+        self.conn.commit()
+
+    def get_last_review_event(self, pending_id: str) -> sqlite3.Row | None:
+        """Último "em verificação" da pendência: quem pôs e por quê (o
+        relatório mostra o motivo ao lado do selo)."""
+        return self.conn.execute(
+            "SELECT * FROM pending_item_events WHERE pending_id = ? AND event_type = ? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (pending_id, EVENT_IN_REVIEW),
+        ).fetchone()
+
+    def last_review_actor(self, pending_id: str) -> str | None:
+        """Quem pôs a pendência "em verificação" pela última vez (IA, detector,
+        sistema...) -- decide se uma confirmação nova da IA pode reativá-la."""
+        row = self.get_last_review_event(pending_id)
+        return row["actor"] if row else None
+
+    def get_pending_item_events(self, pending_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM pending_item_events WHERE pending_id = ? ORDER BY created_at, rowid",
+            (pending_id,),
+        ).fetchall()
+
+    def get_recently_closed_pending_items(self, since_iso: str) -> list[sqlite3.Row]:
+        """Pendências encerradas (concluídas ou canceladas) a partir de
+        `since_iso`, de pacientes ainda internados -- bloco "Concluídas
+        recentemente" do relatório (PEND-001, pergunta 3c ao auditor).
+        Filtra por `closed_at`, a hora em que o SISTEMA encerrou -- não por
+        `resolved_at`, que é a data da evidência: fechamento de hoje com
+        evidência de semana passada sumia sem rastro (revisão adversarial)."""
+        return self.conn.execute(
+            "SELECT pi.*, p.record_number, p.bed, p.unit FROM pending_items pi "
+            "JOIN patients p ON p.patient_id = pi.patient_id "
+            "WHERE p.active = 1 AND pi.status IN (?, ?) AND pi.closed_at >= ? "
+            "ORDER BY p.bed, pi.closed_at DESC",
+            (*CLOSED_PENDING_STATUSES, since_iso),
+        ).fetchall()
 
     def update_pending_item_progress(
         self, pending_id: str, *, confidence: str | None = None, flow_status: str | None = None
@@ -679,14 +964,15 @@ class Repository:
         self.conn.commit()
 
     def get_all_active_pending_items(self) -> list[sqlite3.Row]:
-        """Pendências ativas de TODOS os pacientes ativos, sem filtro por
-        `unit` -- ver `mark_patients_inactive_not_in` sobre o motivo (DEC-061).
-        `unit` aqui é só texto exibido, nunca um critério de filtro."""
+        """Pendências ABERTAS (ativas e em verificação, PEND-001) de TODOS os
+        pacientes ativos, sem filtro por `unit` -- ver
+        `mark_patients_inactive_not_in` sobre o motivo (DEC-061). `unit` aqui
+        é só texto exibido, nunca um critério de filtro."""
         return self.conn.execute(
             "SELECT pi.*, p.record_number, p.bed, p.unit FROM pending_items pi "
             "JOIN patients p ON p.patient_id = pi.patient_id "
-            "WHERE p.active = 1 AND pi.status = ? ORDER BY p.bed",
-            (PENDING_ACTIVE,),
+            "WHERE p.active = 1 AND pi.status IN (?, ?) ORDER BY p.bed, pi.created_at",
+            OPEN_PENDING_STATUSES,
         ).fetchall()
 
     def get_resolved_pending_items(self) -> list[sqlite3.Row]:
