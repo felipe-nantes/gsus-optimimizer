@@ -1468,3 +1468,31 @@ Nenhum teste executa `shutdown.exe`: há runner falso e uma trava que recusa o c
 - Commit local da Fase 2 e push depois da aprovação do usuário.
 - Respostas do auditor (pergunta 2 antes de valer em produção).
 - Fase 3 (PEND-001).
+
+## 2026-10-14 — Fase 3 dos ajustes do auditor implementada (PEND-001: ciclo de vida das pendências)
+
+**Pedidos do usuário:** "A fase 2 tá aprovada. Porém, ainda não tenho as respostas do auditor [...] Dá para continuar e adicionar as respostas dele depois?"; "Siga da forma que voce achar melhor. Lembrando que o sistema precisa funcionar sem falhas diariamente"; depois, "Editor esta de acordo com todas as perguntas" (o auditor concordou com todos os padrões propostos).
+
+**Feito (detalhe no adendo da Fase 3 do DEC-129 e em TASKS.md::PEND-001):**
+- Estados novos (Ativa, Em verificação pelo auditor, Concluída automaticamente, Concluída pelo auditor, Cancelada), histórico só de acréscimo (`pending_item_events`) e migração idempotente.
+- Detector determinístico (`specialties.py`, `specialty_evaluation.py`): fecha interconsulta, exame e punção só com prova POSITIVA posterior ao pedido, olhando a internação inteira; na dúvida, "Em verificação pelo auditor". Cancelamento só com motivo definitivo sobre o próprio pedido.
+- Regras só criam pendências, frase a frase, com `alvo`; contrato v2 da IA com `alvo` e decisão por pendência registrada (só as que mudaram); "sumiu da resposta" não fecha mais.
+- Reconciliação por (categoria, alvo); pendência de internação anterior vai para verificação; pedido já atendido não é recriado; pedido repetido depois da resposta vira pendência nova com a data certa.
+- Relatório e dashboard: selo e motivo da verificação, "Concluídas recentemente" (3 dias), contagem no cartão "Com pendência ativa", tempo de resolução pelas datas do prontuário.
+- Respostas do auditor registradas no DEC-129 (padrões adotados viram definitivos); 4a/4b e 5c/5d/5f ficam para confirmar com o usuário antes das Fases 4 e 5.
+
+**Método:**
+- Implementação e testes.
+- Avaliação com o modelo real em 5 casos fictícios, porta isolada (8899): o modelo acerta 4 de 7 decisões; reaplicadas as saídas na reconciliação + detector, os estados finais ficam certos.
+- Cinco revisões adversariais, cada achado reproduzido por um revisor e conferido por um verificador, e cada contraexemplo transformado em teste: 1ª 51 confirmados; 2ª 44 + 2 plausíveis; 3ª 52 + 1; 4ª 30 + 7 (inclui um travamento real: "12/9999" num texto desligava o detector do paciente toda noite); 5ª, só fechamento falso e travamento, 13 confirmados (inclui uma regex exponencial e um laço cúbico em frase colada), todos corrigidos.
+- Ensaio da migração + detector numa cópia do banco de dev (só contagens; cópia apagada): 191 pacientes em 1,2 s, sem erro.
+- Desempenho do detector numa internação sintética longa: 2,0 s (480 evoluções, 8 pendências) a 9,4 s (600 evoluções de 3.000 caracteres, 30 pendências).
+
+**Achado principal:** cada rodada de revisão ainda acha casos de borda de texto livre — o desenho conservador (prova positiva; na dúvida, verificação) é o que segura o erro mais grave, o fechamento falso. Os achados conscientemente não corrigidos (nenhum fecha pendência aberta) estão listados no DEC-129. A validação real (ACCEPT-001) vai mostrar o volume de "Em verificação" com dados de verdade.
+
+**Testes:** unitários + E2E + integração (sem o parser do censo) com 1762 aprovados (eram 696); painel Tk fora do OneDrive com 19 aprovados; parser do censo com os 10 erros conhecidos de Chromium. Cada commit local deixa a suíte verde.
+
+**Pendente:**
+- Aprovação do usuário e push da Fase 3 (commits locais feitos).
+- PROJECT_SPEC (RF-23/RF-30) depois da aprovação.
+- Fase 4 (PEND-002): confirmar 4a/4b com o usuário antes.

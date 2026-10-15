@@ -904,51 +904,75 @@ mínimos de aceitação da seção 7 (cada um vira teste nomeado).
                  prompt, relatório, dashboard).
                  PENDENTE: faixas de sinais vitais só valem em produção após a resposta do
                  auditor (pergunta 2); validação real na 1.6.0.
-[ ] PEND-001     Fase 3 -- Ciclo de vida das pendências (seções 3 e 4; casos 2, 3 e parte do 6).
-                 - Esquema aditivo (`database.py::_migrate`): `pending_items` + `alvo`,
-                   `resolution_source` (IA / REGRA / DETECTOR / AUDITOR / LEGADO),
-                   `resolution_evidence`, `resolution_evidence_date`, `resolved_by`; estados
-                   ACTIVE / IN_REVIEW / RESOLVED / CANCELLED (rótulos: Ativa, Em verificação pelo
-                   auditor, Concluída automaticamente, Concluída pelo auditor, Cancelada). Tabela
-                   nova `pending_item_events` (só acréscimo: quando, quem, de->para, evidência,
-                   justificativa). Migração idempotente, histórico inicial a partir de
-                   created_at/resolved_at; ensaiada antes na cópia do banco desta máquina.
-                 - Contrato v2 (`schemas.py`/`llm.py`): `alvo` por pendência; lista
-                   `revisao_pendencias` com uma decisão por pendência anterior (MANTIDA /
-                   CONCLUIDA / CANCELADA / INCERTA, com evidência e data). "Sumiu da resposta"
-                   deixa de resolver; decisão omitida mantém o estado; INCERTA -> IN_REVIEW.
-                   Pedido novo do especialista -> pendência nova e específica. Anotação de
-                   enfermagem sobre punção/contato/presença do serviço não abre pendência quando
-                   o atendimento já ocorreu.
-                 - Casamento por (categoria, alvo normalizado), regra e IA no mesmo conjunto --
-                   fim das duplicatas e do colapso de duas interconsultas numa só
-                   (`STAGE_PROGRESSION_CATEGORIES`).
-                 - `app/analysis/specialties.py` (novo): sinônimos de especialidade (cargo
-                   "Médico nefrologista", "PELA NEFRO", "nefrologia" -> NEFROLOGIA).
-                 - `app/analysis/specialty_evaluation.py` (novo): detector determinístico --
-                   evolução posterior ao pedido com cargo da especialidade-alvo ou linha "PELA
-                   <esp>" (ignora "pela manhã/tarde/noite") fecha como Concluída automaticamente,
-                   com a evidência e a data dessa evolução; varre o histórico do paciente no
-                   banco, não só a janela. Mesmo esquema para punção ("puncionado", "acesso obtido
-                   com sucesso") e exame (laudo/resultado, mantendo a exclusão de "aguardando
-                   laudo").
-                 - Regra de interconsulta (`rules.py`): gatilho com sinônimos ("solicito",
-                   "parecer da", "IC com") normalizado pela tabela de especialidades; evidência
-                   passa a ser a frase, não a nota inteira.
-                 - Primeira execução após a migração: o detector passa uma vez sobre as
-                   pendências já ativas (no banco de dev fecharia 15 de 27 interconsultas com
-                   especialidade reconhecível); contagem no log.
-                 - Tempo de resolução: em fechamento automático com evidência, `resolved_at` =
-                   data da evidência (nunca antes de created_at) -- senão a limpeza da migração
-                   inflaria a mediana.
-                 - Relatório: estado de cada pendência e bloco "Concluídas recentemente" com a
-                   evidência da conclusão. Dashboard: cartão "Em verificação pelo auditor".
-                 Testes: unit (detector, sinônimos, casamento por alvo, duas interconsultas
-                 simultâneas separadas, contrato v2 + reparo, omissão mantém estado, migração
-                 idempotente, eventos); E2E com fixtures sintéticas (pedido -> evolução da
-                 especialidade -> concluída; especialista pede exame -> pendência nova; punção com
-                 sucesso -> concluída; evidência incompleta -> em verificação); rodada do modelo
-                 real em casos sintéticos. Pergunta 3 do DEC-129.
+[x] PEND-001     Fase 3 -- Ciclo de vida das pendências (seções 3 e 4; casos 2, 3 e parte do 6).
+                 IMPLEMENTADO 2026-10-14 (DEC-129, adendo da Fase 3).
+                 - Estados: Ativa / Em verificação pelo auditor / Concluída automaticamente /
+                   Concluída pelo auditor / Cancelada (ACTIVE, IN_REVIEW, RESOLVED, CANCELLED +
+                   `resolution_source` IA/REGRA/DETECTOR/AUDITOR/LEGADO). `pending_items` ganhou
+                   `alvo`, evidência/data da conclusão, `resolved_by` e `closed_at` (hora em que o
+                   sistema encerrou); tabela nova `pending_item_events`, só acréscimo. Migração
+                   idempotente que só escreve quando há trabalho (a tela abre o banco a cada 60 s);
+                   ensaiada na cópia do banco de dev.
+                 - `app/analysis/specialties.py` + `specialty_evaluation.py` (novos): detector que
+                   varre a internação inteira, com sinal POSITIVO e verificação na dúvida.
+                   Interconsulta: evolução ASSINADA pela especialidade ou bloco "PELA
+                   <ESPECIALIDADE>" com avaliação FEITA (paciente não visto, "ciente"/"será
+                   avaliado", espera da equipe que pediu em qualquer ponto da linha, avaliação
+                   datada antes do pedido e especialidade que já evoluía antes -> Em verificação;
+                   "Médico clínico" não diz a especialidade; subgrupo não é a especialidade
+                   inteira). Exame: resultado ligado ao próprio exame e à mesma região (coluna por
+                   segmento, membro por lado, laudo por região), nunca plano/indicação, texto de
+                   enfermagem depois de "realizado" ou frase que volta a esperar o mesmo exame;
+                   anatomopatológico só com o diagnóstico; cultura só do mesmo material, parcial
+                   -> verificação. Punção: sucesso do tipo pedido no dispositivo que o verbo
+                   governa (PICC, cateter de diálise e PAI próprios; punção sem tipo nunca fecha
+                   sozinha; caso 3 da equipe de punção). Cancelamento: motivo definitivo sobre o
+                   próprio pedido, escrito pela equipe que pediu. Histórico (datas, inclusive
+                   "ontem"/"na sexta-feira", palavras de histórico, cópia com ou sem contador de
+                   dias) nunca conta; espera/reiteração depois da prova -> verificação; pedido
+                   novo não é conflito.
+                 - Regras (`rules.py`): só criam, por frase, com alvo; o verbo tem de governar o
+                   exame ou a cabeça da interconsulta ("Solicito parecer da X: motivo" vale); um
+                   item por região listada; itens de "Exames solicitados:" com a linha original
+                   como evidência; pedido negado/condicional no infinitivo, "conforme parecer da X"
+                   e frase que já traz resultado/resposta não contam; marcador de histórico só vale
+                   colado ao próprio pedido; data do pedido só a que o verbo governa; cópia de
+                   pedido já atendido não recria.
+                 - Contrato v2: `alvo` por pendência nova; `revisao_pendencias` só com as que
+                   mudaram (CONCLUIDA/CANCELADA/INCERTA), lista de no máximo 12. Encerrar
+                   interconsulta/exame/punção só se o detector chegar à mesma ação; outras
+                   categorias, trecho inteiro de evolução posterior ao pedido (e ao pedido mais
+                   novo absorvido), conclusão perto do assunto na mesma oração, vaga só com verbo
+                   de vaga, mesma ação, sem repetição/espera do pedido depois -- senão Em
+                   verificação. "Sumiu da resposta" não fecha mais; decisão omitida mantém o estado.
+                 - Casamento por (categoria, alvo) entre regra e IA, com alvo genérico próprio para
+                   especialidade fora da tabela; alvos livres só iguais/contidos e com a mesma
+                   ação; exame sem região não absorve exame com região; pendência aberta de
+                   internação anterior -> Em verificação (SISTEMA), sem casar nem fechar; pedido já
+                   atendido não é recriado; texto que volta depois de 3 dias, ou com evolução
+                   médica no meio sem ele, é pedido novo (cada reaparição); trecho inverificável
+                   nunca é datado antes da evolução mais nova lida pela IA; punção já feita não
+                   abre pendência.
+                 - Confiabilidade: cada etapa isolada, com rollback da transação; data impossível
+                   ("12/9999") ignorada; evoluções pré-processadas uma vez por paciente; caches
+                   limitados e liberados também em execução com falha; contagens por paciente e
+                   totais da execução no log.
+                 - Relatório/dashboard: selo e motivo da verificação, "Concluídas recentemente"
+                   (3 dias, pela hora do encerramento), "N pend. em verificação" no cartão "Com
+                   pendência ativa" (cartões de largura igual), "[Em verificação]" na pendência
+                   principal, tempo de resolução pelas datas do prontuário (rótulo ajustado).
+                 - Revisões adversariais (achado reproduzido + verificador; tudo virou teste): 1ª
+                   (94 agentes) 51 confirmados; 2ª (78 agentes) 44 confirmados + 2 plausíveis; 3ª 52
+                   confirmados + 1 plausível; 4ª (8 agentes) 30 confirmados + 7 plausíveis; 5ª
+                   (4 agentes, só fechamento falso e travamento) 13 confirmados, todos corrigidos --
+                   inclusive uma regex exponencial e um laço cúbico em frase colada. Achados
+                   conscientemente não corrigidos (nenhum fecha pendência aberta) listados no DEC-129.
+                 Testes: suíte 696 -> 1762 (+19 do painel Tk, rodado fora do OneDrive), com as
+                 regressões das cinco revisões; cada commit local deixa a suíte verde. Modelo real
+                 (5 casos fictícios): 4 de 7 decisões certas; com o detector, todos os estados
+                 finais certos. Ensaio no banco de dev: 191 pacientes em 1,2 s.
+                 PENDENTE: aprovação do usuário e push; validação real na 1.6.0 (totais no log da
+                 primeira execução após a migração; auditor confere os itens Em verificação).
 [ ] PEND-002     Fase 4 -- Confirmação manual pelo auditor (seção 5; casos 6 e 7; RF-30).
                  - Janela "Revisar pendências" (Toplevel), aberta pela tabela de pacientes e pela
                    janela ampliada (botão + menu de contexto; o duplo-clique continua abrindo o

@@ -2623,3 +2623,105 @@ Tudo foi reescrito, e cada contraexemplo virou teste.
 **Pendente:**
 - Validação real na 1.6.0.
 - As faixas de sinais vitais dependem da resposta do auditor à pergunta 2.
+
+**Fase 2 aprovada pelo usuário (2026-10-13)** e enviada ao GitHub (`f619745`).
+
+**Decisão do usuário (2026-10-13, depois da aprovação da Fase 2):** seguir sem as respostas do auditor e encaixá-las depois. Cada resposta entra num ponto único do código, que já tem um padrão interno.
+
+**Respostas do auditor (2026-10-14, repassadas pelo usuário):** "de acordo com todas as perguntas". Os padrões adotados enquanto a resposta não vinha passam a valer como definitivos:
+
+| Pergunta | Padrão confirmado | Onde está |
+|---|---|---|
+| 1a. Desligar só depois da atualização da madrugada | Só depois da execução AGENDADA, e só com a opção ligada (desligada por padrão) | `app/main.py::run_auto_update` → `_shutdown_after_scheduled_run` |
+| 1b. Desligar mesmo depois de falha | Desliga também depois de uma execução que falhou (o motivo aparece na tela de manhã); não desliga se ela nem começou | `app/main.py::run_auto_update` (variável `ran`) |
+| 1c. Tempo do aviso | 3 min | `app/shutdown.py::WARNING_SECONDS` |
+| 2a. Faixas de sinais vitais do adulto | FR 12–20, FC 60–100, PA 90–139/60–89, Tax 36,0–37,7, SpO₂ ≥ 94%, HGT 70–180 | `app/analysis/vital_ranges.py::ADULT_RANGES` |
+| 2b. O₂/ventilação, pediatria, neonatal, alojamento conjunto: só citar o valor | Sem qualificação automática nesses casos (e no setor obstétrico, decisão da 2ª revisão da Fase 2) | `vital_ranges.py`; `clinical_filters.py::fix_vital_qualifiers` |
+| 2c. Acréscimos à lista de rotina | Nenhum: fica a lista conservadora atual | `app/analysis/clinical_filters.py` |
+| 3a. Os 5 estados | Ativa, Em verificação pelo auditor, Concluída automaticamente, Concluída pelo auditor, Cancelada | `app/reports/dashboard_metrics.py` (`PENDING_*_LABEL`) |
+| 3b. Outras formas de a especialidade registrar a avaliação | Nenhuma além das duas: evolução assinada pela especialidade e bloco "PELA <ESPECIALIDADE>", as duas só com conteúdo de avaliação. Frase de outra equipe relatando a resposta vai para verificação | `specialties.py`, `specialty_evaluation.py::_consult_evidence` |
+| 3c. Dias em que a pendência encerrada fica visível | 3 dias | `dashboard_metrics.py::RECENTLY_CLOSED_DAYS` |
+| 5a, 5b, 5e, 5g; 6a, 6b, 6c | Como escritos nas perguntas e no plano (decisões 6 e 9) | EDD-002/EDD-003; LOOKUP-001 |
+
+Ficam para confirmar com o usuário ao começar a fase, porque a pergunta oferecia duas opções sem propor uma: 4a (um auditor por PC — o plano propõe o nome nas Configurações, perguntado uma vez) e 4b (data da marcação ou data real), na Fase 4; 5c (48h da admissão ou do parto), 5d (prazo da cesárea) e 5f (RN pela própria admissão — o plano exclui ler o nome da mãe), na Fase 5.
+
+**Fase 3 implementada (2026-10-14): PEND-001.**
+
+*O que entrou:*
+1. **Estados e histórico.**
+   - Ativa, Em verificação pelo auditor, Concluída automaticamente, Concluída pelo auditor e Cancelada. Por baixo: `IN_REVIEW`, `CANCELLED` e `resolution_source` (IA / REGRA / DETECTOR / AUDITOR / LEGADO).
+   - Tabela nova `pending_item_events`, em que só se acrescenta (quem, quando, de → para, evidência, motivo).
+   - Colunas novas em `pending_items`: `alvo`, `resolution_source`, `resolution_evidence`, `resolution_evidence_date`, `resolved_by` e `closed_at` (hora em que o SISTEMA encerrou; `resolved_at` é a data da evidência).
+   - Migração idempotente, com histórico inicial reconstruído e `LEGADO` nas pendências já resolvidas. Ela só escreve quando há algo a fazer (a tela abre o banco a cada 60 s).
+2. **Detector determinístico** (`specialty_evaluation.py` e `specialties.py`, novos). Varre a internação inteira no banco a cada execução, nas Fases 1 e 2. O sinal é sempre POSITIVO e, na dúvida, o item vai para verificação, nunca para concluído.
+   - **Interconsulta** fecha só com os dois sinais do plano e do auditor — evolução ASSINADA pela especialidade ou bloco "PELA <ESPECIALIDADE>" — e só com avaliação FEITA (avaliado, sugiro, sem indicação, conduta com objeto, risco cirúrgico com classe). Vão no máximo para verificação: paciente não visto; "ciente", "será avaliado", "retornaremos" sem avaliação feita; a espera da equipe que pediu, em qualquer ponto da linha "PELA X" ("IC enviada", "aguarda.", "parecer pendente"); avaliação datada antes do pedido ("em 15/08", "ontem", "no dia 18"); especialidade que já evoluía o paciente antes do pedido (cargo, bloco "PELA" ou cabeçalho com o nome dela). O cargo "Médico clínico" (plantonista) não diz a especialidade. Especialidade qualificada por subgrupo ("cardiologia intervencionista", "cirurgia (vascular)") não é a especialidade inteira.
+   - **Exame** fecha só com resultado ligado ao próprio exame (na oração dele ou depois dos dois-pontos dele) e da mesma região — segmento da coluna e lado do membro contam; exame de várias regiões com laudo por região só fecha a região laudada. Ficam de fora: plano/indicação ("repetir TC de controle do hematoma", item debaixo de "CONDUTA:"), texto de enfermagem ou de exame clínico depois de "realizado" ("sem alterações no período", "normal à ausculta"; o achado genérico só vale escrito por médico), frase que traz um resultado e volta a esperar o mesmo exame. "Exame realizado" sem resultado vai para verificação. Anatomopatológico só com o diagnóstico do patologista; cultura só do mesmo material (osso, swab, partes moles, lavado, escarro e aspirado são materiais diferentes) e parcial vai para verificação. ECO TE, angio-RM, cada cintilografia e o cateterismo cardíaco (não o vesical) são exames próprios.
+   - **Punção** fecha só com sucesso afirmativo do tipo pedido, no dispositivo que o verbo governa (PICC, cateter de diálise e PAI têm tipo próprio; PAI em femoral não é CVC; "punção de CVC a seguir" é plano), incluindo o "atendimento realizado com sucesso" da equipe de punção (caso 3). Pedido de punção sem tipo nunca fecha sozinho; punção para coleta ou medicação não conta.
+   - **Cancelamento** só com motivo definitivo escrito sobre o próprio pedido ("mudança de estratégia", "sem indicação", "melhora clínica"), nunca negado, condicional ou em pergunta. Suspensão por ora, em duplicidade, de outro dispositivo ("suspensa passagem de Shilley" não cancela o CVC), com motivo de outra coisa ("sem necessidade de transferir") ou escrita por outra especialidade vai para verificação.
+   - **Histórico** não conta: data anterior ao pedido (dd/mm, mm/aaaa, ano solto, "do dia 15", "ontem", "na sexta-feira", "semana passada"), palavras de histórico (admissão, entrada, PS, outro serviço, linha de diagnóstico) e cópia de frase ou bloco "PELA" que já existia — inclusive com o contador de dias trocado ("DIH 5" → "DIH 6"). Resultado datado no dia do pedido vai para verificação.
+   - **Conflito:** frase nova dizendo que ainda espera (reiteração, "ainda não avaliado", "aguarda parecer da X", "PELA X: aguarda avaliação", "ainda aguarda passagem de CVC", "aguarda TC de controle" quando o pedido é o de controle) gera verificação, inclusive na própria evolução da prova. Pedido novo, ordem que veio da especialidade e seguimento não são conflito. Vale a primeira prova sem conflito depois dela.
+3. **Regras** (`rules.py`). Só criam pendências, frase a frase, com `alvo`:
+   - cada exame PEDIDO vira um item, um por região listada ("TC de crânio, tórax e abdome"), inclusive itens de lista debaixo de "Exames solicitados:" (a evidência é a linha como está na evolução);
+   - o verbo tem de governar o exame ou a cabeça da interconsulta ("Solicito parecer da X: motivo" vale; "Parecer da X: sem indicação..., solicitado ECO" não); "Parecer da X: solicitado" vale;
+   - pedido negado, condicional ou ponderado no infinitivo ("se piora, solicitar TC", "sem necessidade de solicitar"), "conforme parecer da X", frase que já traz o resultado do exame ou a resposta da especialidade não contam; marcador de histórico na justificativa ("febre há 2 dias", "comparar com a TC anterior") não apaga o pedido;
+   - data do pedido só a que o verbo governa direto ("solicitado em 20/08"), nunca futura, anterior à internação ou de outro pedido da mesma frase;
+   - a cópia de um pedido já atendido não recria a pendência.
+4. **Contrato v2 da IA.**
+   - Cada pendência nova traz `alvo`.
+   - Em `revisao_pendencias`, a IA informa só as pendências registradas que MUDARAM (CONCLUIDA, CANCELADA, INCERTA). A lista enviada tem no máximo 12, começando pelas em verificação.
+   - CONCLUIDA/CANCELADA: em interconsulta, exame e punção, só vale se o detector, olhando a internação inteira, chegar à mesma ação (aí ele encerra, com a evidência dele). Nas outras categorias, o trecho inteiro tem de estar numa evolução gravada posterior ao pedido (e ao pedido mais novo que a pendência absorveu), sem ser cópia nem histórico; a palavra de conclusão (ou o motivo definitivo do cancelamento) tem de estar perto de uma palavra do assunto, na mesma oração; vaga/transferência só com o verbo dela ("vaga liberada", "transferido para"); a ação tem de ser a do pedido (liberação não conclui suspensão); e nenhuma evolução da prova em diante pode repetir ou voltar a esperar o pedido. Caso contrário, verificação.
+   - Data do pedido de item novo: a da evolução mais antiga com o trecho inteiro (assim a reemissão do pedido já atendido é reconhecida); se o texto volta depois de uma resposta — mais de 3 dias depois, ou com uma evolução médica no meio sem ele —, é pedido novo e vale a data da volta (cada reaparição é olhada, não só a primeira). Trecho que não está nas evoluções: nunca antes da evolução mais nova que a IA leu.
+5. **Reconciliação.**
+   - Casamento por (categoria, alvo) entre regra e IA. Especialidade fora da tabela ganha alvo genérico próprio (duas interconsultas assim não viram uma). Alvo vazio não casa com nada; alvos livres só casam iguais (com sinônimos) ou um contido no outro, e nunca com ação diferente ("liberação" x "suspensão"). Exame sem região não absorve exame com região. Etapa de interconsulta que o detector não fecha não absorve pedido novo.
+   - Pedido já atendido não é recriado; reemissão sem trecho verificável de algo encerrado nesta internação é ignorada (encerrado há mais de 7 dias: cria em verificação).
+   - Pendência que ficou aberta de uma internação ANTERIOR vai uma vez para verificação (ator SISTEMA) e não casa com pedido novo nem é fechada por evolução de agora.
+   - Anotação que registra a punção já feita não abre pendência.
+   - Decisão omitida mantém o estado (DEC-129, decisão 3).
+6. **Confiabilidade.** Cada etapa do PEND-001 é isolada (falha só no log), desfaz a transação que ficou aberta e não derruba o paciente nem a noite. Data impossível no texto ("validade 12/9999") é ignorada. As evoluções da internação são pré-processadas uma vez por paciente; os caches por frase são limitados e liberados no fim da execução, inclusive quando ela falha. O log ganhou uma linha por paciente (detector, migração, decisões da IA) e uma linha de totais por execução.
+7. **Relatório e dashboard.**
+   - Selo "Em verificação pelo auditor" com o motivo; bloco "Concluídas recentemente" (3 dias pela hora em que o sistema encerrou), com quem, quando e com que evidência.
+   - "N pend. em verificação" no rodapé do cartão "Com pendência ativa" (cartões com largura igual; cabe em 1024×700 com 3 dígitos).
+   - Marcador "[Em verificação]" na pendência principal, escolhida por prioridade.
+   - Tempo de resolução medido pelas datas do prontuário (pedido → evidência de conclusão); o rótulo do relatório diz isso. Responde de fato à pergunta 4b para os fechamentos automáticos; a marcação manual é da Fase 4.
+
+*Diferenças em relação ao texto do plano:*
+- **Passagem única sobre as pendências antigas:** em vez de rodar "na migração", acontece na Fase 1 de cada paciente, toda noite (e no começo da análise da IA). A camada de banco não conhece regra clínica, e o efeito é o mesmo.
+- **Frase de outra equipe relatando a resposta:** não fecha, vai no máximo para verificação, como manda a regra do auditor.
+- **Interconsulta de regra antiga sem especialidade reconhecível** ("Aguarda avaliação de quadro"): vai para verificação, porque não teria como ser fechada nem casada.
+- **Cartão "Em verificação":** em vez de cartão próprio, entra como contagem no rodapé do cartão "Com pendência ativa". As pendências em verificação continuam abertas.
+- **Fechamento confirmado pela IA em interconsulta/exame/punção** fica registrado como do DETECTOR (a evidência é a dele).
+
+*Avaliação com o modelo real (5 casos fictícios, porta isolada 8899; carga 75 s, 139–276 s por análise, system prompt de 2.427 tokens):* o modelo acertou 4 de 7 decisões esperadas. Manteve aberta a interconsulta já respondida e o exame suspenso, e omitiu duas decisões no caso com três pendências; numa das rodadas copiou como evidência a linha da lista de pendências do próprio prompt. Reaplicadas as saídas reais na reconciliação + detector (de novo depois das revisões), os estados finais ficam certos: interconsulta respondida → Concluída (DETECTOR); sem resposta → Ativa; exame suspenso por mudança de estratégia → Cancelado (DETECTOR); exame sem laudo → Em verificação; a decisão "CONCLUIDA" dada ao código da vaga errada → Em verificação. Confirma que o fechamento depende do detector, não do modelo.
+
+*Revisões adversariais (cada achado reproduzido por um revisor e conferido por um verificador; cada contraexemplo virou teste):*
+- **1ª:** 8 dimensões, 94 agentes, 63 achados: 51 confirmados, 7 plausíveis e 5 refutados. A 1ª versão do detector FECHAVA pendência ainda aberta em dezenas de frases comuns ("Necessário parecer da X", "PELA NEFRO: aguardando", "Pendências: TC de crânio", "CVC ainda não passado", "TC suspensa, reagendar"), tinha alvo errado (quem pediu virava o alvo) e problemas de confiabilidade (UPDATE sem efeito segurando a trava do banco, datas absurdas da IA, lista crescendo até estourar a resposta, 8–80 s por paciente).
+- **2ª (sobre as correções):** 4 dimensões, 78 agentes, 51 achados: 44 confirmados, 2 plausíveis e 5 refutados. O desenho virou POSITIVO (conteúdo de avaliação ou achado ligado ao exame). Também: item novo da IA datado por uma resposta antiga, alvo vazio casando com tudo, cópia de evolução recriando pedido, transação presa depois de erro engolido, ausência de contagens no log. 197 testes; 184 falham no código anterior.
+- **3ª (sobre as correções da 2ª):** 53 achados mantidos (52 confirmados, 1 plausível). Principais: "ciente"/"será avaliado" e a linha "PELA X" da equipe que pediu contando como avaliação; bloco "PELA" de rotina de especialidade que já acompanhava; cópia com contador de dias trocado; resultado de outro membro, segmento de coluna, material de cultura ou modalidade; cancelamento condicional ou negado; "pai" virando PAI; trecho da IA conferido só no começo; pendência de internação anterior absorvendo o pedido novo; alvos livres com uma palavra em comum juntando pedidos diferentes; regras perdendo pedidos comuns ou criando pedidos de histórico; cache de blocos "PELA" prendendo até 110 MB. 184 testes; 101 falham no código anterior.
+- **4ª (sobre as correções da 3ª, 8 agentes):** 38 achados: 30 confirmados, 7 plausíveis e 1 refutado. Fechamento falso: espera no FIM da linha "PELA X" ("..., aguarda.", "IC em aberto"); resultado antigo e "aguarda TC de controle" na mesma frase; "será realizada avaliação", "alta da UTI", "risco cirúrgico solicitado", "parecer: pendente", "HD:" e conduta de outra equipe contando como avaliação; laudo de uma região de exame com várias regiões fechando a outra; PAI em femoral fechando CVC e cancelamento de outro dispositivo; texto de enfermagem lido como laudo; datas relativas ("ontem"); materiais de cultura agrupados; motivo de cancelamento de outra coisa; trecho da IA casando por radical de 5 letras ("hemodinâmica" x "hemodiálise"), cancelamento de outro remédio, ação oposta, prova anterior a um pedido mais novo. Pedido perdido (regressões da 3ª): "Solicito parecer da X: motivo", marcador de histórico na justificativa, ", aguarda laudo", vírgula entre o verbo e a cabeça, e a cópia do dia seguinte escondendo o pedido novo. Travamento real: "12/9999" ou "06/0000" num texto desligava o detector do paciente toda noite. Desempenho: checagem de histórico repetida (agora em cache). 208 testes.
+- **5ª (só fechamento falso e travamento nas correções da 4ª, 4 agentes):** 16 achados: 13 confirmados e 3 refutados, todos os confirmados corrigidos. Fechamento falso: achado genérico do médico sobre outro assunto depois de "realizado" ("hemograma sem alterações", "sem alterações na conduta"); "retornaremos para exame físico", "avaliado pela UTI", "parecer: hoje à tarde" e "classe a definir" contando como avaliação; futuro na terceira pessoa na linha da equipe que pediu ("nefro avaliará amanhã", "deve avaliar"); motivo negativo com adjetivo ("sem indicação formal de sedação") ou sobre outro exame; espera depois da prova com a data do pedido original ("solicitada há 2 dias"), "Nefro ainda não avaliou" (o "o" final era comido pela regex), linha "PELA X" de paciente não visto e espera debaixo de "Nefrologia:"; controle ainda programado ("repetir em 24h"), região sem laudo na frase seguinte; trecho da IA com a conclusão perto de palavra comum ("vaga de enfermaria liberada" para a vaga de UTI, "para evitar hemodiálise") e a vaga perdida depois da prova. Desempenho: a regex nova do aparte entre vírgulas era exponencial (27 s numa frase de 140 caracteres com palavras repetidas) e o pedido de exame em frase colada era cúbico (85 s a 9.600 caracteres) — agora lineares e limitados. 85 testes; os dois testes de decisão da IA da 4ª rodada, que não chegavam ao código testado, foram refeitos com a prova na janela.
+
+*Achados registrados e não corrigidos (decisões conscientes; nenhum fecha pendência aberta):*
+- Menção sem região depois do fechamento do exame com região reabre um item em verificação (3ª revisão; corrigir arriscaria descartar pedido diferente).
+- Reemissão da IA com trecho levemente reescrito até 7 dias depois de uma resposta é ignorada (3ª revisão; o prompt carrega o estado anterior, que pode citar o pedido antigo).
+- Etapa de interconsulta da IA depois de uma interconsulta SOLICITADA (aberta ou encerrada) não vira item próprio (4ª revisão; segue o DEC-064, protegido por teste).
+- Evolução médica de plantão entre a resposta e a cópia do pedido faz a cópia contar como pedido novo — item a mais, em aberto (4ª revisão; o contrário perderia pedidos reais).
+- Alvo livre reemitido com uma palavra a mais depois do encerramento ("VAGA UTI ADULTO") recria o item (4ª revisão; ruído).
+- "Admitido na UTI" como prova de vaga vai para verificação (4ª revisão; a palavra "admitido" é histórico de propósito).
+- Formatos de pedido sem verbo ("IC p/ nefro", "Acionada nefrologia", itens de "CONDUTA:") ficam com a IA; pedido e resultado na mesma evolução deixam o item aberto até um resultado posterior (4ª revisão).
+
+*Instabilidade de testes (não é defeito do código):*
+- Testes de Tk falham de forma intermitente só na pasta do OneDrive ("Can't find a usable tk.tcl", contagem do aviso de desligamento); fora dela, 0 falhas. O programa instalado roda fora do OneDrive.
+- Os 10 erros de integração do parser do censo são o Chromium do Playwright que não abre nesta máquina (os mesmos no código do HEAD).
+
+*Verificação:*
+- Suíte unitária + E2E + integração (sem o parser do censo): 1762 aprovados (eram 696 na Fase 2). Painel Tk numa cópia fora do OneDrive: 19 aprovados. Parser do censo: 1 aprovado e os 10 erros conhecidos de Chromium.
+- Cada um dos commits locais da fase deixa a suíte verde (conferido montando cada estado numa cópia fora do OneDrive).
+- Reaplicação das saídas reais do modelo: estados finais certos (acima).
+- Ensaio da migração + detector na cópia do banco de dev, só contagens e cópia apagada: 191 pacientes em 1,2 s (mediana 2 ms, máximo 166 ms), sem erro.
+- Detector numa internação SINTÉTICA longa: 2,0 s (480 evoluções, 8 pendências) a 9,4 s (600 evoluções de 3.000 caracteres, 30 pendências).
+- Rodapé "N pend. em verificação" medido na janela mínima (1024×700) com 3 dígitos: cabe.
+
+**Pendente:**
+- Aprovação do usuário e push.
+- Validação real na 1.6.0 (ACCEPT-001): a primeira execução depois da migração deve mostrar no log os totais (fechadas pelo detector, em verificação, alvos preenchidos), e o auditor confere os itens "Em verificação".
+- Confirmar 4a/4b antes da Fase 4 e 5c/5d/5f antes da Fase 5.
