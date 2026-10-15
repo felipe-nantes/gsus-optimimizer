@@ -131,6 +131,33 @@ def test_system_prompt_carries_the_auditor_rules():
         assert fragment in SYSTEM_PROMPT, fragment
 
 
+def test_registered_items_are_listed_with_codes_target_and_review_status():
+    """PEND-001 (contrato v2): a IA decide cada pendência pelo código."""
+    items = [
+        {"ref": "P1", "category": "INTERCONSULTA", "subcategory": "SOLICITADA",
+         "description": "Aguarda avaliação da infectologia", "evidence_date": "2026-08-20T08:00:00",
+         "alvo": "INFECTOLOGIA", "status": "ACTIVE"},
+        {"ref": "P2", "category": "DIAGNOSTICO", "subcategory": None, "description": "Aguarda TC de crânio",
+         "evidence_date": None, "alvo": "TOMOGRAFIA DE CRÂNIO", "status": "IN_REVIEW"},
+    ]
+    prompt = build_prompt(previous_state=None, new_notes=[], active_pending_items=items)
+    assert "PENDÊNCIAS REGISTRADAS (em revisao_pendencias, pelo código, só as que mudaram):" in prompt
+    assert ("- P1 [INTERCONSULTA/SOLICITADA] Aguarda avaliação da infectologia -- alvo INFECTOLOGIA "
+            "(desde 2026-08-20T08:00:00)") in prompt
+    assert "- P2 [DIAGNOSTICO] Aguarda TC de crânio -- alvo TOMOGRAFIA DE CRÂNIO (em verificação)" in prompt
+
+
+def test_system_prompt_carries_the_v2_contract():
+    from app.analysis.llm import SYSTEM_PROMPT
+
+    for fragment in (
+        "revisao_pendencias", '"ref": "P1"', "MANTIDA|CONCLUIDA|CANCELADA|INCERTA",
+        "CONCLUIDA e CANCELADA exigem evidence", "pending_items é só para pendências NOVAS", '"alvo"',
+        "só as que MUDARAM", "A que segue aberta pode ficar de fora",
+    ):
+        assert fragment in SYSTEM_PROMPT, fragment
+
+
 def test_prompt_and_notes_budget_stay_within_the_calibrated_total():
     """Achado da revisão adversarial do LLM-006: a calibração real
     (DEC-093/094) garantiu o TOTAL system prompt + notas dentro do

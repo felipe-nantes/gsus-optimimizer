@@ -11,11 +11,13 @@ BLOCKED_GSUS -- ver DECISIONS.md) quanto com fontes sintéticas em teste
 """
 from __future__ import annotations
 
+import bisect
 import logging
 import queue
+import re
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -25,7 +27,21 @@ from app.analysis.priority import compute_priority, days_since_admission, hours_
 from app.analysis.rules import StructuredNote, apply_all_rules, most_recent_note
 from app.analysis.edd import infer_edd_from_notes
 from app.analysis.sources import classify_source, is_physician
-from app.analysis.taxonomy import CATEGORY_INTERCONSULTA, CATEGORY_PROCEDIMENTO_CIRURGIA, default_origin
+from app.analysis.schemas import (
+    DECISION_CANCELLED, DECISION_RESOLVED, DECISION_UNCERTAIN, REVIEW_FIELD, normalize_review_decisions,
+)
+from app.analysis.specialty_evaluation import (
+    ACTION_CANCEL, ACTION_RESOLVE, ACTION_REVIEW, CONSULT_CLOSABLE_SUBTYPES as _CONSULT_CLOSABLE_SUBTYPES,
+    DetectorNote, DetectorSession, alvo_core_words, cited_dates, clear_caches, evidence_shows_done, is_canonical_target,
+    is_history,
+    kind_and_target, normalize_target, notes_blob, puncture_already_done, quote_confirms_cancel, quote_confirms_done,
+    quote_in_notes, quote_is_about_item, reference_time, regions_for, request_already_handled, resolution_time_utc,
+    KIND_PUNCTURE,
+)
+from app.analysis.specialties import fold
+from app.analysis.taxonomy import (
+    CATEGORY_DIAGNOSTICO, CATEGORY_INTERCONSULTA, CATEGORY_PROCEDIMENTO_CIRURGIA, default_origin,
+)
 from app.extraction.hashing import compute_note_hash
 from app.extraction.normalizer import (
     normalize_datetime,
@@ -46,11 +62,51 @@ from app.reports import dashboard_metrics
 from app.reports.html_report import generate_report
 from app.security import pseudonym
 from app.storage import database
-from app.storage.repository import Repository
+from app.storage.repository import (
+    CLOSED_PENDING_STATUSES, PENDING_IN_REVIEW, RESOLUTION_DETECTOR, RESOLUTION_LLM, Repository,
+)
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str], None]
+
+
+class _Pend001Totals:
+    """Contagens do PEND-001 na execução inteira (as duas fases), pra uma
+    linha de resumo no fim -- é o que a validação em produção (ACCEPT-001)
+    lê no log (2ª revisão adversarial: só o detector contava, por paciente)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counts: dict[str, int] = {}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._counts = {}
+
+    def add(self, key: str, amount: int = 1) -> None:
+        if amount:
+            with self._lock:
+                self._counts[key] = self._counts.get(key, 0) + amount
+
+    def snapshot(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._counts)
+
+
+_PEND001_TOTALS = _Pend001Totals()
+
+
+def _rollback_quietly(repo: Repository) -> None:
+    """Depois de uma falha engolida: desfaz a transação que ficou aberta.
+    Sem isto, um "database is locked" passageiro deixava a conexão da Fase 2
+    presa numa transação e o resto da noite falhava na hora (2ª revisão
+    adversarial)."""
+    try:
+        if repo.conn.in_transaction:
+            repo.conn.rollback()
+    except Exception:
+        logger.exception("Falha ao desfazer transação depois de erro -- seguindo")
 
 # Achado real 2026-08-25 (DEC-066): paciente com muito backlog acumulado (1ª
 # análise depois de muito tempo sem rodar, ou admissão bem longa) manda TODO
@@ -197,6 +253,7 @@ def run_once(
     # `repo.start_run()` (abaixo); continuar `None` cobre uma falha ainda
     # mais cedo (login/censo), quando não há run nenhuma pra marcar FAILED.
     run_id: str | None = None
+    _PEND001_TOTALS.reset()
     try:
         report("Preparando...")
         repo.resume_incomplete_runs()
@@ -427,6 +484,7 @@ def run_once(
                                 logger.exception("Falha ao refazer o login do GSUS após falhas seguidas na busca")
                 except Exception as exc:  # isolamento de falha por paciente -- RF-12
                     logger.exception("Falha ao processar paciente %s", pseudonym.for_log(patient_id))
+                    _rollback_quietly(repo)
                     repo.mark_error(run_id, patient_id, _safe_error_text(exc))
                     # Outro erro = o GSUS respondeu de algum jeito; zera o disjuntor.
                     consecutive_unresponsive = 0
@@ -569,6 +627,14 @@ def run_once(
             except Exception:
                 logger.exception("Falha ao contar correções de exibição -- execução segue concluída mesmo assim")
 
+        # PEND-001: uma linha com tudo o que mudou de estado nas pendências
+        # nesta execução (detector, migração, decisões da IA) -- só contagens.
+        totals = _PEND001_TOTALS.snapshot()
+        if totals:
+            logger.info("PEND-001: totais da execução -- %s",
+                        ", ".join(f"{key}={value}" for key, value in sorted(totals.items())))
+        clear_caches()  # caches por frase do detector: memória do PC fraco
+
         # DIAG-001 (2026-09-03, pedido do usuário): registra, em linguagem
         # simples, o que aconteceu nesta execução -- pra que o auditor (sem
         # conhecimento técnico) saiba se uma falha foi o GSUS/rede (não é
@@ -616,6 +682,7 @@ def run_once(
         return RunResult(run_id=run_id, counts=repo.get_run_counts(run_id), report_path=report_output_path)
     except Exception as exc:
         logger.exception("Execução abortada por erro não tratado")
+        clear_caches()  # a execução que falhou também libera a memória dos caches (4ª revisão)
         if run_id is not None:
             try:
                 repo.finish_run(run_id, "FAILED")
@@ -756,9 +823,11 @@ def _llm_phase2_worker(
                     "Falha inesperada na análise por IA do paciente %s -- seguindo pros demais",
                     pseudonym.for_log(patient_id),
                 )
+                _rollback_quietly(worker_repo)
             try:
                 generate_report(worker_repo, run_id, unit, report_output_path)
             except Exception:
+                _rollback_quietly(worker_repo)
                 logger.exception(
                     "Falha ao regravar relatório após paciente %s -- análise por IA segue mesmo assim",
                     pseudonym.for_log(patient_id),
@@ -841,50 +910,67 @@ def _process_patient_rules(
     previous_necessidade = previous_state_row["necessidade_hospitalar"] if previous_state_row else None
 
     # `apply_all_rules` roda sobre as notas desta janela a cada execução --
-    # sem reconciliar contra o que já está ativo, cada rodada inseriria uma
-    # pendência NOVA duplicada enquanto a condição continuasse verdadeira
-    # (achado real, DEC-062). `source="RULE"` isola isso da reconciliação do
-    # LLM (`_run_llm_analysis`) -- ciclos de vida independentes.
+    # sem reconciliar contra o que já está registrado, cada rodada inseriria
+    # uma pendência NOVA duplicada enquanto o pedido continuasse na janela
+    # (achado real, DEC-062). PEND-001: casa por (categoria, alvo) contra as
+    # pendências ABERTAS de qualquer fonte -- regra e IA não duplicam mais uma
+    # à outra -- e não recria o que já foi encerrado depois deste pedido
+    # (senão o pedido de anteontem, ainda na janela, reabriria toda noite a
+    # interconsulta que o detector acabou de fechar).
     #
     # IMPORTANTE (achado real, DEC-064): `all_structured_notes` NÃO é o
-    # histórico completo contra o GSUS real -- `get_raw_notes_text(patient,
-    # known_days)` pula dias já conhecidos (só reenvia os ~2 dias mais
-    # recentes + novos, ver app/gsus/records.py). Por isso NUNCA resolvemos
-    # uma pendência de regra só por ela "não ter aparecido" nesta janela --
-    # a nota de origem pode simplesmente ter saído do recorte incremental
-    # sem o exame/parecer ter sido concluído de verdade. Só resolvemos
-    # quando `apply_all_rules` devolve um achado com `resolved=True` -- ou
-    # seja, quando a MESMA janela de notas contém tanto a solicitação quanto
-    # a conclusão, prova real de resolução (não inferência por ausência).
-    active_rule_rows = [r for r in repo.get_active_pending_items(patient_id) if r["source"] == "RULE"]
-    for finding in apply_all_rules(all_structured_notes):
-        # Casa por descrição (determinística por construção -- RuleFinding
-        # sempre gera o mesmo texto pro mesmo exame/especialidade): distingue
-        # corretamente duas pendências de regra concorrentes e diferentes
-        # (ex.: tomografia E ultrassom abertos ao mesmo tempo -- achado real,
-        # DEC-064; categoria+subtipo sozinhos colidiam nesse caso, já que
-        # RULES-001 usa um subtipo único por categoria pra todo tipo de exame).
-        existing = _find_matching_pending(active_rule_rows, finding.category, finding.subcategory, finding.description)
-
-        if finding.resolved:
-            if existing is not None:
-                repo.resolve_pending_item(existing["pending_id"])
-            continue
-
-        if existing is not None:
-            continue
-
-        hours_elapsed = hours_elapsed_since(finding.evidence_date)
-        priority = compute_priority(finding.category, previous_necessidade, hours_elapsed)
-        repo.add_pending_item(
-            patient_id, finding.category, finding.description, finding.evidence, finding.evidence_date,
-            subcategory=finding.subcategory, origin=finding.origin, priority=priority, is_inferred=False,
-            source="RULE",
-        )
+    # histórico completo -- `get_raw_notes_text(patient, known_days)` só
+    # reenvia os ~2 dias mais recentes + novos. Por isso nada fecha por "não
+    # ter aparecido" nesta janela: quem fecha é o detector logo abaixo, que
+    # lê a internação inteira do banco e exige prova posterior ao pedido.
+    try:
+        _apply_rules_and_detector(repo, patient, patient_id, all_structured_notes, cutoff_iso, previous_necessidade)
+    except Exception:
+        # Confiabilidade diária: um defeito nas regras/no detector nunca pode
+        # derrubar o paciente (as evoluções já foram gravadas; a IA segue).
+        logger.exception("PEND-001: falha nas regras/detector do paciente %s -- seguindo", pseudonym.for_log(patient_id))
+        _rollback_quietly(repo)
 
     if not new_structured_notes:
         return None
     return _prepare_notes_for_llm(new_structured_notes, LLM_LOOKBACK_DAYS)
+
+
+def _apply_rules_and_detector(
+    repo: Repository, patient: Patient, patient_id: str, all_structured_notes: list[StructuredNote],
+    cutoff_iso: str | None, previous_necessidade: str | None,
+) -> None:
+    open_rows = _current_open_rows(_backfill_targets(repo, patient_id, patient.admission_date), patient.admission_date)
+    all_rows = _current_admission_rows(repo.get_patient_pending_items(patient_id), patient.admission_date)
+    session = DetectorSession(_admission_notes(repo, patient_id, patient.admission_date))
+    for finding in apply_all_rules(all_structured_notes, cutoff_iso):
+        if _find_by_target(_matchable_rows(open_rows, finding.subcategory), finding.category, finding.alvo) is not None:
+            continue
+        # O primeiro pedido da janela que ainda NÃO foi atendido -- um
+        # "reitero parecer" depois da avaliação é pedido novo; o original,
+        # anterior a ela, não reabre nada. A CÓPIA do pedido já atendido
+        # (evolução copiada do dia anterior) também não: 2ª revisão
+        # adversarial -- criava uma pendência que nunca mais fechava.
+        unhandled = next(
+            (occurrence for occurrence in finding.occurrences
+             if _closed_after(all_rows, finding.category, finding.alvo, occurrence[0]) is None
+             and not _copy_of_handled_request(session, all_rows, finding.category, finding.alvo, occurrence)),
+            None,
+        )
+        if unhandled is None:
+            continue
+        evidence_date, evidence = unhandled
+        hours_elapsed = hours_elapsed_since(evidence_date)
+        priority = compute_priority(finding.category, previous_necessidade, hours_elapsed)
+        repo.add_pending_item(
+            patient_id, finding.category, finding.description, evidence, evidence_date,
+            subcategory=finding.subcategory, origin=finding.origin, priority=priority, is_inferred=False,
+            source="RULE", alvo=finding.alvo,
+        )
+        _PEND001_TOTALS.add("criadas_regra")
+        open_rows = _current_open_rows(repo.get_active_pending_items(patient_id), patient.admission_date)
+
+    _close_answered_pending_items(repo, patient_id, patient.admission_date, session=session)
 
 
 def _limit_to_recent_window(
@@ -1114,6 +1200,292 @@ def _find_matching_pending(active_rows, category: str, subcategory: str | None, 
     return None
 
 
+def _find_by_target(rows, category: str, alvo: str | None):
+    """PEND-001: mesma pendência = mesma categoria e mesmo alvo normalizado,
+    de qualquer fonte (regra ou IA). Sem alvo, nada casa por aqui. Exame sem
+    região ("TOMOGRAFIA", regra antiga) casa com o mesmo exame COM região só
+    quando o próprio texto do item cita essa região (2ª revisão: senão o
+    pedido antigo e o mesmo pedido relido viravam duas pendências; 3ª: "TC
+    por suspeita de AVC" engolia a "TC de abdome" pedida depois, e o laudo da
+    primeira fechava as duas)."""
+    if not alvo:
+        return None
+    for row in rows:
+        if row["category"] == category and row["alvo"] == alvo:
+            return row
+    if category == CATEGORY_DIAGNOSTICO:
+        exam, _, region = alvo.partition(" DE ")
+        if region:
+            for row in rows:
+                if row["category"] == category and row["alvo"] == exam \
+                        and region in regions_for(exam, (row["description"], row["evidence"])):
+                    return row
+    return None
+
+
+def _matchable_rows(rows, incoming_subcategory: str | None):
+    """Interconsulta registrada num estágio que o detector não fecha
+    ("realizada sem conduta definida") não engole um pedido NOVO de
+    interconsulta à mesma especialidade (3ª revisão)."""
+    if incoming_subcategory not in _CONSULT_CLOSABLE_SUBTYPES:
+        return rows
+    return [row for row in rows if row["category"] != CATEGORY_INTERCONSULTA
+            or row["subcategory"] in _CONSULT_CLOSABLE_SUBTYPES]
+
+
+def _closed_after(all_rows, category: str, alvo: str | None, request_evidence_date: str | None):
+    """Pendência ENCERRADA com o mesmo alvo depois deste pedido -- o pedido
+    já foi atendido (ou o auditor já decidiu). Devolve a linha, ou None."""
+    if not alvo:
+        return None
+    for row in all_rows:
+        if row["status"] not in CLOSED_PENDING_STATUSES:
+            continue
+        if row["category"] != category or row["alvo"] != alvo:
+            continue
+        if request_already_handled(request_evidence_date, row["resolution_evidence_date"], row["resolved_at"]):
+            return row
+    return None
+
+
+def _closure_local_iso(row) -> str | None:
+    """Quando a pendência encerrada foi atendida (horário local): a data da
+    evidência que provou, ou -- sem ela -- a do encerramento."""
+    if row["resolution_evidence_date"]:
+        return row["resolution_evidence_date"]
+    try:
+        stamp = row["closed_at"] or row["resolved_at"]
+        return datetime.fromisoformat(stamp).astimezone().replace(tzinfo=None).isoformat(timespec="seconds") \
+            if stamp else None
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def _current_admission_rows(rows, admission_date: str | None):
+    """Pendências desta internação: as encerradas ANTES da admissão atual
+    (internação anterior do mesmo prontuário) não dizem nada sobre um pedido
+    de hoje (2ª revisão: "parecer da cardiologia" respondido em março
+    descartava o pedido novo de agosto)."""
+    cutoff = pre_admission_cutoff_iso(admission_date)
+    if not cutoff:
+        return rows
+    kept = []
+    for row in rows:
+        if row["status"] in CLOSED_PENDING_STATUSES:
+            closure = _closure_local_iso(row)
+            if closure and closure[:10] < cutoff:
+                continue
+        kept.append(row)
+    return kept
+
+
+def _from_previous_admission(row, cutoff: str | None) -> bool:
+    if not cutoff:
+        return False
+    stamp = row["evidence_date"] or row["created_at"] or ""
+    return bool(stamp) and stamp[:10] < cutoff
+
+
+def _current_open_rows(rows, admission_date: str | None):
+    """Pendências abertas DESTA internação. A que ficou aberta de uma
+    internação anterior não casa com pedido novo nem é fechada pelo detector
+    com evolução de agora (3ª revisão: o pedido de agosto virava evidência
+    do item de março, e uma evolução anterior ao pedido de agosto o
+    fechava). Ela vai uma vez para verificação no backfill."""
+    cutoff = pre_admission_cutoff_iso(admission_date)
+    return [row for row in rows if not _from_previous_admission(row, cutoff)]
+
+
+# Cópia de evolução: a mesma frase aparece em dias seguidos. Pedido igual que
+# volta depois de dias sem aparecer é pedido NOVO (2ª revisão adversarial).
+COPY_FORWARD_MAX_GAP = timedelta(days=3)
+
+
+def _new_request_after(session: DetectorSession, quote: str | None, boundary_iso: str | None, *,
+                       by_sentence: bool = False, until_iso: str | None = None) -> str | None:
+    """O trecho volta a aparecer depois de `boundary` (horário local) como
+    pedido NOVO? Devolve a data da primeira evolução nova com ele; None se
+    não volta, ou se volta só como cópia. Cópia = estava nas evoluções logo
+    antes e continuou sendo copiado: toda evolução MÉDICA entre a última
+    aparição antes e a primeira depois também o tem (3ª revisão: o mesmo
+    pedido escrito de novo 2 dias depois da resposta, com uma evolução
+    médica sem ele no meio, era descartado como cópia)."""
+    if not quote or not boundary_iso:
+        return None
+    notes = session.notes_with_sentence(quote) if by_sentence else session.notes_containing(quote)
+    # `until_iso`: só as aparições até a ocorrência que se quer classificar
+    # (ela é cópia ou pedido novo?) -- as de depois são outra pergunta.
+    after = [note for note in notes if note.timestamp > boundary_iso and (until_iso is None or note.timestamp <= until_iso)]
+    if not after:
+        return None
+    before = [note for note in notes if note.timestamp <= boundary_iso]
+    previous = before[-1].timestamp if before else None
+    containing = {id(note) for note in notes}
+    physician = sorted((note.timestamp, id(note)) for note in session.notes
+                       if note.timestamp and is_physician(note.role))
+    # Cada reaparição em ordem, não só a primeira (4ª revisão: uma cópia no
+    # dia seguinte à resposta escondia todo pedido igual escrito depois).
+    for note in after:
+        if previous is None:
+            return note.timestamp
+        try:
+            gap = datetime.fromisoformat(note.timestamp) - datetime.fromisoformat(previous)
+        except (ValueError, TypeError):
+            return None
+        if gap > COPY_FORWARD_MAX_GAP:
+            return note.timestamp
+        # Só as evoluções DEPOIS do atendimento contam (a própria resposta da
+        # especialidade fica no meio e, claro, não repete o pedido).
+        window_start = max(previous, boundary_iso)
+        low = bisect.bisect_right(physician, (window_start, float("inf")))
+        for stamp, note_id in physician[low:]:
+            if stamp >= note.timestamp:
+                break
+            if note_id not in containing:
+                return note.timestamp  # uma evolução médica no meio não o copiou: foi escrito de novo
+        previous = note.timestamp
+    return None
+
+
+def _latest_closure(all_rows, category: str, alvo: str | None, before_iso: str | None):
+    """A pendência encerrada (mesma categoria e alvo) mais recente cujo
+    atendimento é anterior a `before_iso`."""
+    if not alvo or not before_iso:
+        return None
+    candidates = [
+        (closure, row) for row in all_rows
+        if row["status"] in CLOSED_PENDING_STATUSES and row["category"] == category and row["alvo"] == alvo
+        and (closure := _closure_local_iso(row)) is not None and closure < before_iso
+    ]
+    return max(candidates, key=lambda pair: pair[0]) if candidates else None
+
+
+def _copy_of_handled_request(session: DetectorSession, all_rows, category: str, alvo: str | None, occurrence) -> bool:
+    """Ocorrência de pedido (regra) que é cópia de um pedido JÁ atendido: a
+    mesma frase já estava nas evoluções antes do atendimento e continuou
+    sendo copiada depois dele. Compara a FRASE inteira, de qualquer tamanho
+    (3ª revisão: "Peço ECO." curto escapava)."""
+    request_iso, sentence = occurrence
+    latest = _latest_closure(all_rows, category, alvo, request_iso)
+    if latest is None:
+        return False
+    closure_iso, _row = latest
+    notes = session.notes_with_sentence(sentence)
+    if not any(note.timestamp <= closure_iso for note in notes):
+        return False  # frase nova depois do atendimento: pedido novo
+    return _new_request_after(session, sentence, closure_iso, by_sentence=True, until_iso=request_iso) is None
+
+
+def _backfill_targets(repo: Repository, patient_id: str, admission_date: str | None = None):
+    """Pendência aberta gravada antes do PEND-001 (ou sem alvo reconhecível
+    na época) ganha o `alvo` que dá pra deduzir da descrição (e, pra exame,
+    da evidência, quando a região é inequívoca) -- é o que deixa o detector
+    fechá-la e a regra/IA casar com ela. Interconsulta criada pela regra
+    ANTIGA sem especialidade reconhecível ("Aguarda avaliação de quadro", 51
+    de 78 no banco de dev) nunca teria como ser fechada nem casada: vai pra
+    "Em verificação pelo auditor", sem sumir. Pendência que ficou aberta de
+    uma internação ANTERIOR também vai pra verificação (3ª revisão)."""
+    rows = repo.get_active_pending_items(patient_id)
+    filled = moved = previous = 0
+    cutoff = pre_admission_cutoff_iso(admission_date)
+    for row in rows:
+        if _from_previous_admission(row, cutoff):
+            previous += int(repo.set_pending_in_review(
+                row["pending_id"], actor="SISTEMA",
+                note="Pendência aberta de uma internação anterior do mesmo prontuário -- confira se ainda vale.",
+            ))
+            continue
+        if row["alvo"]:
+            continue
+        if row["source"] == "LLM" or row["category"] == CATEGORY_DIAGNOSTICO:
+            evidence = row["evidence"]
+        else:
+            evidence = None
+        target = normalize_target(row["category"], None, row["description"], evidence)
+        old_rule_consult = row["source"] == "RULE" and row["category"] == CATEGORY_INTERCONSULTA
+        if target and not (old_rule_consult and not is_canonical_target(row["category"], target)):
+            repo.set_pending_alvo(row["pending_id"], target)
+            filled += 1
+        elif old_rule_consult:
+            moved += int(repo.set_pending_in_review(
+                row["pending_id"], actor="SISTEMA",
+                note="Criada por regra de versão anterior sem especialidade reconhecível -- confira se ainda vale.",
+            ))
+    if filled or moved or previous:
+        logger.info("PEND-001: migração -- %d alvo(s) preenchido(s), %d interconsulta(s) antiga(s) em verificação, "
+                    "%d de internação anterior em verificação, paciente %s",
+                    filled, moved, previous, pseudonym.for_log(patient_id))
+        _PEND001_TOTALS.add("alvos_preenchidos", filled)
+        _PEND001_TOTALS.add("migracao_em_verificacao", moved)
+        _PEND001_TOTALS.add("internacao_anterior_em_verificacao", previous)
+    return repo.get_active_pending_items(patient_id) if filled or moved or previous else rows
+
+
+def _admission_notes(repo: Repository, patient_id: str, admission_date: str | None) -> list[DetectorNote]:
+    """Todas as evoluções desta internação já gravadas (menos a folga do
+    DEC-119 antes da admissão) -- base do detector e da checagem das
+    decisões da IA."""
+    cutoff_iso = pre_admission_cutoff_iso(admission_date)
+    return [
+        DetectorNote(timestamp=row["timestamp"], role=row["source_type"], text=row["text"])
+        for row in repo.get_notes(patient_id)
+        if not (cutoff_iso and row["timestamp"] and row["timestamp"][:10] < cutoff_iso)
+    ]
+
+
+def _close_answered_pending_items(
+    repo: Repository, patient_id: str, admission_date: str | None, *, session: DetectorSession | None = None,
+) -> int:
+    """PEND-001: roda o detector sobre TODAS as evoluções desta internação já
+    gravadas (não só a janela nova) e conclui o que tem prova posterior ao
+    pedido -- interconsulta avaliada, punção realizada, exame com resultado.
+    Nunca derruba o paciente: falha aqui só é registrada no log."""
+    try:
+        return _close_answered_pending_items_unsafe(repo, patient_id, admission_date, session)
+    except Exception:
+        logger.exception("PEND-001: falha no detector do paciente %s -- pendências ficam como estão",
+                         pseudonym.for_log(patient_id))
+        _rollback_quietly(repo)
+        return 0
+
+
+def _close_answered_pending_items_unsafe(
+    repo: Repository, patient_id: str, admission_date: str | None, session: DetectorSession | None,
+) -> int:
+    open_rows = _current_open_rows(repo.get_active_pending_items(patient_id), admission_date)
+    if not open_rows:
+        return 0
+    if session is None:
+        session = DetectorSession(_admission_notes(repo, patient_id, admission_date))
+    counts = {ACTION_RESOLVE: 0, ACTION_CANCEL: 0, ACTION_REVIEW: 0}
+    for found in session.detect(open_rows):
+        if found.action == ACTION_RESOLVE:
+            changed = repo.resolve_pending_item(
+                found.pending_id, source=RESOLUTION_DETECTOR, evidence=found.evidence,
+                evidence_date=found.evidence_date, resolved_at=found.resolved_at, note=found.note,
+            )
+        elif found.action == ACTION_CANCEL:
+            changed = repo.cancel_pending_item(
+                found.pending_id, source=RESOLUTION_DETECTOR, evidence=found.evidence,
+                evidence_date=found.evidence_date, resolved_at=found.resolved_at, note=found.note,
+            )
+        else:
+            changed = repo.set_pending_in_review(
+                found.pending_id, actor=RESOLUTION_DETECTOR, note=found.note,
+                evidence=found.evidence, evidence_date=found.evidence_date,
+            )
+        counts[found.action] += int(changed)
+    if any(counts.values()):
+        logger.info(
+            "PEND-001: detector -- %d concluída(s), %d cancelada(s), %d em verificação, paciente %s",
+            counts[ACTION_RESOLVE], counts[ACTION_CANCEL], counts[ACTION_REVIEW], pseudonym.for_log(patient_id),
+        )
+        _PEND001_TOTALS.add("detector_concluidas", counts[ACTION_RESOLVE])
+        _PEND001_TOTALS.add("detector_canceladas", counts[ACTION_CANCEL])
+        _PEND001_TOTALS.add("detector_em_verificacao", counts[ACTION_REVIEW])
+    return counts[ACTION_RESOLVE] + counts[ACTION_CANCEL]
+
+
 def _run_llm_analysis(
     repo: Repository, patient_id: str, llm: AnalysisEngine, new_notes: list[StructuredNote],
     window_limited: bool = False,
@@ -1127,22 +1499,29 @@ def _run_llm_analysis(
     # Sem isso o LLM só veria texto livre do estado anterior, não a lista
     # estruturada do que está pendente -- não conseguiria dizer se uma
     # pendência antiga foi resolvida pelas evoluções novas. Contexto inclui
-    # TODAS as pendências ativas (regra + LLM) -- só a reconciliação abaixo
-    # (reiteração/resolução) precisa distinguir a origem (DEC-062).
-    all_active_rows = repo.get_active_pending_items(patient_id)
+    # TODAS as pendências abertas (regra + LLM, ativas e em verificação).
+    # PEND-001 (contrato v2): cada uma ganha um código (P1, P2...) e a IA
+    # devolve uma decisão por código.
+    # Pendência aberta de internação ANTERIOR fica fora (está em verificação
+    # para o auditor; nem a IA nem o detector decidem por ela -- 3ª revisão).
+    # A Fase 1 já a moveu; repetir aqui é idempotente e cobre a análise que
+    # roda sem a Fase 1 antes.
+    patient_row = repo.get_patient_by_record_number(patient_id)
+    admission_date = patient_row["admission_date"] if patient_row is not None else None
+    open_rows = _current_open_rows(_backfill_targets(repo, patient_id, admission_date), admission_date)
+    rows_by_ref = {f"P{index}": row for index, row in enumerate(_registered_for_prompt(open_rows), start=1)}
     active_pending_items = [
         {
-            "category": row["category"], "subcategory": row["subcategory"],
+            "ref": ref, "category": row["category"], "subcategory": row["subcategory"],
             "description": row["description"], "evidence_date": row["evidence_date"],
+            "alvo": row["alvo"], "status": row["status"],
         }
-        for row in all_active_rows
+        for ref, row in rows_by_ref.items()
     ]
-    active_rows = [r for r in all_active_rows if r["source"] == "LLM"]
 
     # LLM-006 (pedido do auditor, DEC-129, caso 1): unidade e leito do censo
     # entram no prompt como fonte de verdade -- antes o modelo deduzia a
     # localização de evolução antiga ("leito de observação" pra paciente na UTI).
-    patient_row = repo.get_patient_by_record_number(patient_id)
     patient_context = (
         {"unit": patient_row["unit"], "bed": patient_row["bed"], "admission_date": patient_row["admission_date"]}
         if patient_row is not None else None
@@ -1155,7 +1534,6 @@ def _run_llm_analysis(
     # recente desta internação como referência, dentro do mesmo orçamento.
     notes_for_llm = new_notes
     if new_notes and not any(is_physician(n.source_type) for n in new_notes):
-        admission_date = patient_row["admission_date"] if patient_row is not None else None
         reference = _latest_physician_note(repo, patient_id, new_notes, admission_date)
         if reference is not None:
             notes_for_llm, cut = _limit_to_char_budget(
@@ -1211,45 +1589,456 @@ def _run_llm_analysis(
         analysis_window_limited=window_limited,
     )
 
-    # Reconcilia as pendências reportadas agora contra as que já estavam
-    # ativas (DEC-062): mesma categoria+subtipo -> REITERAÇÃO (evidência
-    # nova acrescentada, evidence_date/description ORIGINAIS preservados --
-    # seção 5 da orientação técnica exige a PRIMEIRA evidência documental,
-    # nunca a mais recente). Categoria+subtipo novo -> pendência nova.
-    # Pendência ativa que não foi reconfirmada nesta análise -> resolvida
-    # (o prompt já pede pro LLM reavaliar cada uma -- isso só fecha o ciclo
-    # que faltava).
-    matched_pending_ids = set()
+    # PEND-001 (contrato v2, DEC-129 seção 3): primeiro as DECISÕES da IA
+    # sobre o que já estava registrado (de qualquer fonte), depois as
+    # pendências novas, casadas por (categoria, alvo).
+    # Trecho citado pela IA só vale se estiver nas evoluções que ela recebeu
+    # (achado da avaliação real: ela copiou a linha da lista de pendências do
+    # próprio prompt como "evidência"). As evoluções da internação são
+    # pré-processadas UMA vez por paciente (2ª revisão: refazer por decisão
+    # custava ~26 s em internação longa).
+    blob = notes_blob(note.text for note in notes_for_llm)
+    admission_date = patient_row["admission_date"] if patient_row is not None else None
+    session = DetectorSession(_admission_notes(repo, patient_id, admission_date))
+    sent_times = {note.timestamp for note in notes_for_llm if note.timestamp}
+    decided_ids = _apply_review_decisions(repo, patient_id, rows_by_ref, analysis, blob, session, open_rows)
+
     for item in analysis["pending_items"]:
-        # DEC-119 (achado real): o modelo devolve `evidence_date` no formato
-        # da evolução ("DD/MM/AAAA HH:MM") em mais da metade dos casos --
-        # gravado cru, `hours_elapsed_since` não lia e o censo mostrava
-        # "tempo indeterminado" onde havia data. Normaliza ANTES de persistir.
-        evidence_iso = normalize_llm_datetime(item.get("evidence_date"))
-        existing = _find_matching_pending(active_rows, item["category"], item.get("subcategory"))
-        if existing is not None:
-            matched_pending_ids.add(existing["pending_id"])
-            repo.add_pending_item_evidence(existing["pending_id"], evidence_iso, item["evidence"])
-            repo.update_pending_item_progress(
-                existing["pending_id"], confidence=item.get("confidence"), flow_status=item.get("flow_status")
-            )
-            continue
+        try:
+            _reconcile_new_item(repo, patient_id, item, analysis, blob, session, admission_date, decided_ids, sent_times)
+        except Exception:
+            logger.exception("PEND-001: pendência da IA ignorada por erro, paciente %s", pseudonym.for_log(patient_id))
+            _rollback_quietly(repo)
 
-        hours_elapsed = hours_elapsed_since(evidence_iso)
-        priority = compute_priority(item["category"], analysis["necessidade_hospitalar"], hours_elapsed)
-        # Achado real (DEC-064): o LLM frequentemente devolve origin=null
-        # (campo opcional no contrato) -- sem fallback, a maioria das
-        # pendências do LLM nunca mostrava o selo interna/externa no
-        # relatório (regras sempre têm origin via RuleFinding.origin, só o
-        # caminho do LLM ficava sem default).
-        origin = item.get("origin") or default_origin(item["category"])
-        repo.add_pending_item(
-            patient_id, item["category"], item["description"], item["evidence"], evidence_iso,
-            subcategory=item.get("subcategory"), origin=origin, priority=priority,
-            confidence=item.get("confidence"), is_inferred=bool(item.get("is_inferred")),
-            flow_status=item.get("flow_status"), source="LLM",
+    # "Sumiu da resposta" deixou de concluir (era a ÚNICA regra de
+    # fechamento antes do PEND-001 -- e fechava sem evidência nenhuma).
+    # Pendência que a IA não reemitiu nem decidiu fica COMO ESTÁ (plano
+    # aprovado, DEC-129 decisão 3: "decisão omitida mantém o estado") -- o
+    # prompt v2 pede pra não repetir o que já está registrado, então ausência
+    # é o caso comum e não diz nada. Quem fecha: decisão da IA com evidência
+    # verificada, o detector ou o auditor.
+
+    # Pendência nova que a IA acabou de registrar pode já ter a prova nas
+    # evoluções gravadas (ex.: "aguarda avaliação" de um pedido antigo).
+    _close_answered_pending_items(repo, patient_id, admission_date, session=session)
+
+
+# A IA recebe no máximo isto de pendências registradas por análise (revisão
+# adversarial): a lista e a resposta cresciam com a internação e estouravam
+# o limite de 1200 tokens da resposta -- o paciente deixava de ser analisado
+# toda noite. As que ficam de fora mantêm o estado (decisão omitida).
+MAX_REGISTERED_ITEMS_IN_PROMPT = 12
+
+
+def _registered_for_prompt(open_rows) -> list:
+    """Em verificação primeiro (é o que mais precisa de decisão), depois as
+    ativas mais recentes."""
+    in_review = [row for row in open_rows if row["status"] == PENDING_IN_REVIEW]
+    active = sorted((row for row in open_rows if row["status"] != PENDING_IN_REVIEW),
+                    key=lambda row: row["created_at"] or "", reverse=True)
+    return (in_review + active)[:MAX_REGISTERED_ITEMS_IN_PROMPT]
+
+
+def _sane_llm_date(iso: str | None, admission_date: str | None) -> str | None:
+    """Data devolvida pela IA só vale dentro da internação e até amanhã --
+    revisão adversarial: "15/03/1958" (data de nascimento copiada) e
+    "31/12/9999" derrubavam a análise do paciente toda noite; data no futuro
+    escondia pedidos novos do mesmo alvo até ela passar."""
+    if not iso:
+        return None
+    try:
+        parsed = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    floor = pre_admission_cutoff_iso(admission_date) or "2000-01-01"
+    if parsed.date().isoformat() < floor or parsed > datetime.now() + timedelta(days=1):
+        return None
+    return iso
+
+
+# Palavras de "cabeça" que não distinguem uma pendência de outra ("CIRURGIA
+# ORTOPEDICA" x "CIRURGIA VASCULAR" são duas cirurgias, não uma).
+_GENERIC_ALVO_HEADS = {
+    "CIRURGIA", "VAGA", "PASSAGEM", "EXAME", "EXAMES", "PROCEDIMENTO", "TRANSFERENCIA", "LEITO", "LIBERACAO",
+    "AUTORIZACAO", "RESULTADO", "TERAPIA", "TRATAMENTO", "AJUSTE", "INICIO", "SUSPENSAO", "CONTROLE",
+}
+
+
+_ALVO_ACTIONS = {"INICIO", "SUSPENSAO", "RETIRADA", "TROCA", "LIBERACAO", "AJUSTE"}
+
+
+# Sinônimos comuns nos alvos de texto livre da IA.
+_ALVO_SYNONYMS = {"O2": "OXIGENIO", "OXIGENOTERAPIA": "OXIGENIO", "VM": "VENTILACAO", "VMI": "VENTILACAO",
+                  "TQT": "TRAQUEOSTOMIA", "HD": "HEMODIALISE", "ATB": "ANTIBIOTICO"}
+
+
+def _generic_alvos_compatible(a: str | None, b: str | None) -> bool:
+    """Alvos de texto livre da mesma pendência variam entre análises
+    ("DESMAME OXIGENIO" x "DESMAME O2", "COLECISTECTOMIA" x "COLECISTECTOMIA
+    VIDEOLAPAROSCOPICA"): iguais (com sinônimos) ou um contido no outro.
+    "TRANSFUSAO HEMACIAS" x "TRANSFUSAO PLAQUETAS" não -- a 3ª revisão
+    mostrou "metade das palavras em comum" juntando pedidos diferentes, e
+    fechar um sumia com o outro. Alvo vazio não casa com nada."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # Ação diferente é pedido diferente: "LIBERACAO VANCOMICINA" x "SUSPENSAO
+    # VANCOMICINA", "INICIO HEMODIALISE" x "SUSPENSAO HEMODIALISE" (4ª revisão).
+    if {word for word in a.split() if word in _ALVO_ACTIONS} != {word for word in b.split() if word in _ALVO_ACTIONS}:
+        return False
+    words_a = {_ALVO_SYNONYMS.get(word, word) for word in a.split() if word not in _GENERIC_ALVO_HEADS}
+    words_b = {_ALVO_SYNONYMS.get(word, word) for word in b.split() if word not in _GENERIC_ALVO_HEADS}
+    if not words_a or not words_b:
+        return False
+    return words_a <= words_b or words_b <= words_a
+
+
+# Reemissão sem trecho verificável de algo encerrado há menos que isto: a IA
+# repetindo o pedido original; mais antigo, pode ser pedido novo (verificação).
+UNVERIFIED_REEMISSION_WINDOW = timedelta(days=7)
+
+
+def _unverified_request_date(item, admission_date: str | None, sent_times: set[str]) -> str | None:
+    """Data de pedido com trecho que não está em evolução nenhuma: nunca
+    antes da evolução mais nova que a IA recebeu -- o pedido está em algum
+    ponto do que ela leu, e uma data anterior (a admissão mostrada no prompt,
+    por exemplo) deixava o detector fechar o item com evidência ANTERIOR ao
+    pedido (2ª revisão adversarial)."""
+    ai_iso = _sane_llm_date(normalize_llm_datetime(item.get("evidence_date")), admission_date)
+    candidates = [iso for iso in (ai_iso, max(sent_times) if sent_times else None) if iso]
+    return max(candidates) if candidates else None
+
+
+def _reconcile_new_item(
+    repo, patient_id, item, analysis, blob, session: DetectorSession, admission_date, decided_ids, sent_times,
+) -> None:
+    open_rows = _matchable_rows(_current_open_rows(repo.get_active_pending_items(patient_id), admission_date),
+                                item.get("subcategory"))
+    all_rows = _current_admission_rows(repo.get_patient_pending_items(patient_id), admission_date)
+    alvo = normalize_target(item["category"], item.get("alvo"), item["description"], item["evidence"])
+    # Data do pedido = a da evolução MAIS ANTIGA que contém o trecho citado
+    # (revisão adversarial: data errada da IA deixava evolução ANTERIOR ao
+    # pedido fechá-lo) -- o que mantém a reemissão do pedido já atendido
+    # reconhecida como tal. Mas se o trecho volta depois de um atendimento
+    # após dias sem aparecer, é pedido NOVO com as mesmas palavras e vale a
+    # data da volta (2ª revisão). Sem o trecho nas evoluções: ver
+    # `_unverified_request_date`.
+    quote_notes = session.notes_containing(item["evidence"])
+    sent_quote_notes = [note for note in quote_notes if note.timestamp in sent_times]
+    if quote_notes:
+        evidence_iso = quote_notes[0].timestamp
+        latest_iso = (sent_quote_notes or quote_notes)[-1].timestamp
+    else:
+        evidence_iso = latest_iso = _unverified_request_date(item, admission_date, sent_times)
+    existing = _find_by_target(open_rows, item["category"], alvo)
+    if existing is None and not is_canonical_target(item["category"], alvo):
+        # Alvo de texto livre: casamento antigo por categoria+subtipo
+        # (DEC-064) -- só entre pendências DA IA sem alvo canônico e com alvo
+        # compatível. A revisão mostrou a regra antiga "Aguarda avaliação de
+        # quadro" engolindo todo pedido sem especialidade reconhecida, e
+        # "traqueostomia" virando evidência da colecistectomia.
+        candidates = [
+            r for r in open_rows
+            if r["source"] == "LLM" and not is_canonical_target(r["category"], r["alvo"])
+            and _generic_alvos_compatible(r["alvo"], alvo)
+        ]
+        existing = _find_matching_pending(candidates, item["category"], item.get("subcategory"))
+    if existing is not None:
+        # REITERAÇÃO (DEC-062): evidência nova acrescentada,
+        # evidence_date/description ORIGINAIS preservados -- seção 5 da
+        # orientação técnica exige a PRIMEIRA evidência documental.
+        if existing["pending_id"] not in decided_ids and quote_in_notes(item["evidence"], blob):
+            repo.add_pending_item_evidence(existing["pending_id"], latest_iso, item["evidence"])
+            if _reactivate_if_ai_put_in_review(repo, existing, item["evidence"], latest_iso):
+                _PEND001_TOTALS.add("ia_reativadas")
+        repo.update_pending_item_progress(
+            existing["pending_id"], confidence=item.get("confidence"), flow_status=item.get("flow_status")
         )
+        return
+    item_row = {
+        "category": item["category"], "subcategory": item.get("subcategory"), "alvo": alvo,
+        "description": item["description"], "evidence": item["evidence"], "source": "LLM",
+    }
+    review_note = None
+    if quote_notes:
+        closed = _closed_after(all_rows, item["category"], alvo, evidence_iso)
+        if closed is not None:
+            # O pedido citado já foi atendido (ou o auditor já decidiu) -- a
+            # janela de 14 dias ainda contém o pedido original e a IA tende a
+            # reemiti-lo (achado do DEC-129). Só vira pendência se as mesmas
+            # palavras voltarem depois do atendimento como pedido novo.
+            new_iso = _new_request_after(session, item["evidence"], _closure_local_iso(closed))
+            if new_iso is None:
+                return
+            evidence_iso = new_iso
+    elif alvo:
+        latest = _latest_closure(all_rows, item["category"], alvo, "9999")
+        if latest is not None:
+            # Reemissão de algo já encerrado nesta internação, com trecho que
+            # não está em evolução nenhuma: a IA repetindo o estado anterior
+            # (revisão adversarial -- recriava a interconsulta respondida e
+            # ela nunca mais fechava). Encerramento antigo (mais de uma
+            # semana antes do que a IA leu) pode ser pedido novo: verificação.
+            oldest_sent = min(sent_times) if sent_times else None
+            if not oldest_sent or not _older_than(latest[0], oldest_sent, UNVERIFIED_REEMISSION_WINDOW):
+                logger.info("PEND-001: reemissão sem trecho verificável ignorada, paciente %s",
+                            pseudonym.for_log(patient_id))
+                _PEND001_TOTALS.add("ia_reemissoes_ignoradas")
+                return
+            review_note = ("A IA registrou de novo um pedido já atendido nesta internação, sem trecho verificável "
+                           "nas evoluções -- confira se é um pedido novo.")
+    if evidence_shows_done(item_row):
+        # Avaliação real: "aguardo avaliação da infectologia" citando "Pela
+        # INFECTOLOGIA: paciente avaliado." -- a evidência desmente.
+        logger.info("PEND-001: pendência da IA desmentida pela própria evidência, paciente %s",
+                    pseudonym.for_log(patient_id))
+        _PEND001_TOTALS.add("ia_desmentidas_pela_evidencia")
+        return
+    kind_target = kind_and_target(item_row)
+    if kind_target is not None and kind_target[0] == KIND_PUNCTURE and any(
+            puncture_already_done(item_row, item["evidence"], note, session.first_seen())
+            for note in (sent_quote_notes or quote_notes[-1:])):
+        # Plano do PEND-001 e caso 3 do auditor: anotação de enfermagem que
+        # registra a punção JÁ FEITA não abre pendência.
+        logger.info("PEND-001: pendência de punção já realizada no próprio trecho ignorada, paciente %s",
+                    pseudonym.for_log(patient_id))
+        _PEND001_TOTALS.add("ia_puncao_ja_feita")
+        return
+    if quote_notes and latest_iso and evidence_iso and latest_iso > evidence_iso:
+        # Pedido que já aparecia antes e continua aparecendo: se o detector
+        # o daria por atendido com uma resposta ANTERIOR à última vez que o
+        # pedido aparece, e o pedido voltou depois de dias sem aparecer, é
+        # pedido novo -- vale a data da volta, e só prova posterior fecha
+        # (2ª revisão adversarial: a resposta de dias antes fechava o pedido
+        # de hoje).
+        decided = session.decide({**item_row, "pending_id": "", "evidence_date": evidence_iso,
+                                  "created_at": datetime.now(timezone.utc).isoformat()})
+        if decided is not None and decided.action in (ACTION_RESOLVE, ACTION_CANCEL):
+            new_iso = _new_request_after(session, item["evidence"], decided.evidence_date)
+            if new_iso is not None:
+                evidence_iso = new_iso
 
-    for row in active_rows:
-        if row["pending_id"] not in matched_pending_ids:
-            repo.resolve_pending_item(row["pending_id"])
+    hours_elapsed = hours_elapsed_since(evidence_iso)
+    priority = compute_priority(item["category"], analysis["necessidade_hospitalar"], hours_elapsed)
+    # Achado real (DEC-064): o LLM frequentemente devolve origin=null
+    # (campo opcional no contrato) -- sem fallback, a maioria das
+    # pendências do LLM nunca mostrava o selo interna/externa no
+    # relatório (regras sempre têm origin via RuleFinding.origin, só o
+    # caminho do LLM ficava sem default).
+    origin = item.get("origin") or default_origin(item["category"])
+    pending_id = repo.add_pending_item(
+        patient_id, item["category"], item["description"], item["evidence"], evidence_iso,
+        subcategory=item.get("subcategory"), origin=origin, priority=priority,
+        confidence=item.get("confidence"), is_inferred=bool(item.get("is_inferred")),
+        flow_status=item.get("flow_status"), source="LLM", alvo=alvo,
+    )
+    _PEND001_TOTALS.add("criadas_ia")
+    if review_note:
+        repo.set_pending_in_review(pending_id, actor="SISTEMA", note=review_note)
+        _PEND001_TOTALS.add("ia_em_verificacao")
+
+
+def _older_than(earlier_iso: str, later_iso: str, window: timedelta) -> bool:
+    try:
+        return datetime.fromisoformat(later_iso) - datetime.fromisoformat(earlier_iso) > window
+    except ValueError:
+        return False
+
+
+# Pedido/espera escrito de novo depois da prova, com o assunto da pendência:
+# "Segue aguardando vaga de UTI", "Nova solicitação de vaga de UTI" (4ª revisão).
+_WAIT_OR_REQUEST_CUE = re.compile(r"aguard\w*|solicit\w*|\breiter\w*|\bpendente\b|\bpedid[oa]\b|\bcobrar\b")
+
+
+def _ai_closure_evidence_date(row, quote: str, action: str, session: DetectorSession, open_rows,
+                              absorbed=()) -> str | None:
+    """Para categorias que o detector NÃO avalia (transferência, terapêutica,
+    alta, procedimento que não é punção): data (local) da evolução que
+    comprova a decisão CONCLUIDA/CANCELADA da IA, ou None se o trecho não
+    comprova. A evolução tem de ser posterior ao pedido; o trecho tem de
+    dizer que foi feito (lista positiva, nenhuma recusa/adiamento/falha) --
+    ou, para cancelar, o motivo definitivo -- e tem de ser DESTA pendência,
+    não de outra aberta do paciente (2ª revisão adversarial: "vaga negada",
+    "transferência adiada" e o código trocado entre duas vagas fechavam).
+    3ª revisão: nunca uma frase de histórico copiada de antes do pedido
+    ("recebido da UTI em 05/08"), e nunca quando a evolução que prova -- ou
+    uma posterior -- ainda repete o pedido ("Aguarda vaga de UTI"). 4ª
+    revisão: o pedido mais NOVO que a pendência absorveu (`absorbed`, (data,
+    texto)) também vale -- prova anterior a ele não fecha -- e a espera escrita
+    de outro jeito depois da prova também é conflito."""
+    reference = reference_time(row["evidence_date"], row["created_at"])
+    if reference is None:
+        return None
+    for stamp, _text in absorbed:
+        newer = reference_time(stamp, None)
+        if newer is not None and newer > reference:
+            reference = newer
+    after = []
+    for note in session.notes_containing(quote):
+        try:
+            if datetime.fromisoformat(note.timestamp) > reference:
+                after.append(note)
+            else:
+                return None  # o trecho já estava antes do pedido: cópia, não prova
+        except (ValueError, TypeError):
+            continue
+    if not after:
+        return None
+    folded_quote = fold(quote)
+    try:
+        proving_time = datetime.fromisoformat(after[0].timestamp)
+    except (ValueError, TypeError):
+        return None
+    if is_history(folded_quote) or _cites_date_before_iso(folded_quote, proving_time, reference):
+        return None
+    requests = list(dict.fromkeys(text for text in (row["evidence"], *(text for _stamp, text in absorbed)) if text))
+    later = [note for note in session.notes if note.timestamp and note.timestamp >= after[0].timestamp]
+    later_blobs = [notes_blob([note.text]) for note in later]
+    if any(quote_in_notes(request, blob) for blob in later_blobs for request in requests):
+        return None  # a evolução da prova (ou outra depois) ainda repete o pedido: informação conflitante
+    if _waits_again(row, quote, later, lost_too=action == ACTION_RESOLVE):
+        return None
+    if action == ACTION_RESOLVE:
+        confirmed = quote_confirms_done(quote, row)
+    else:
+        confirmed = quote_confirms_cancel(quote, row)
+    if not confirmed or not quote_is_about_item(quote, row, open_rows):
+        return None
+    return after[0].timestamp
+
+
+# A coisa provada se perdeu depois da prova: "vaga de UTI cancelada pela
+# regulação", "vaga perdida", "transporte suspenso" (5ª revisão).
+_LOST_CUE = re.compile(
+    r"\bcancelad\w*|\bcancelou\b|\bnegad\w*|\bperdid\w*|\bsuspens\w*|\brecusad\w*|\bindeferid\w*|\bsem\s+vaga\b"
+)
+
+
+def _waits_again(row, quote: str, later_notes, *, lost_too: bool = False) -> bool:
+    """Da evolução da prova em diante, uma frase (que não é o próprio trecho)
+    volta a esperar/pedir com as palavras PRÓPRIAS do alvo ("aguarda leito de
+    UTI", "aguarda transferência para UTI" -- sem exigir a cabeça "vaga"), ou
+    diz que a coisa provada se perdeu (`lost_too`, para conclusão)."""
+    core = alvo_core_words(row)
+    head = {word for word in re.findall(r"[a-z0-9]+", fold(row["alvo"])) if len(word) >= 3} - core
+    if not core and not head:
+        return False
+    quoted = notes_blob([quote])
+    for note in later_notes:
+        for sentence in re.split(r"[.;\n]", note.text or ""):
+            folded = fold(sentence)
+            if quote_in_notes(sentence, quoted):
+                continue
+            words = set(re.findall(r"[a-z0-9]+", folded))
+            if core and _WAIT_OR_REQUEST_CUE.search(folded) and core <= words:
+                return True
+            if lost_too and _LOST_CUE.search(folded) and (words & core or words & head):
+                return True
+    return False
+
+
+def _cites_date_before_iso(folded: str, note_time: datetime, reference: datetime) -> bool:
+    return any(cited < reference.date() for cited in cited_dates(folded, note_time.date()))
+
+
+def _apply_review_decisions(
+    repo: Repository, patient_id: str, rows_by_ref: dict, analysis: dict, blob: str, session: DetectorSession,
+    open_rows,
+) -> set[str]:
+    """Aplica `revisao_pendencias` (contrato v2). Devolve os ids decididos.
+    Código desconhecido ou repetido é ignorado; decisão omitida mantém o
+    estado. CONCLUIDA/CANCELADA chegam aqui sempre com evidência (sem ela,
+    `normalize_review_decisions` já rebaixou pra INCERTA) -- e só valem se o
+    trecho estiver nas evoluções enviadas E comprovar o encerramento; senão
+    viram "em verificação" (o auditor confere, nada fecha com evidência que
+    não dá pra verificar). A data gravada é sempre a da evolução citada,
+    nunca a que a IA escreveu."""
+    decided: set[str] = set()
+    outcomes: dict[str, int] = {}
+    for decision in normalize_review_decisions(analysis.get(REVIEW_FIELD)):
+        row = rows_by_ref.get(decision["ref"])
+        if row is None or row["pending_id"] in decided:
+            continue
+        decided.add(row["pending_id"])
+        try:
+            outcome = _apply_one_decision(repo, row, decision, blob, session, open_rows)
+        except Exception:
+            logger.exception("PEND-001: decisão da IA ignorada por erro, pendência mantida")
+            _rollback_quietly(repo)
+            continue
+        if outcome:
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            _PEND001_TOTALS.add(outcome)
+    if outcomes:
+        logger.info("PEND-001: decisões da IA -- %s, paciente %s",
+                    ", ".join(f"{key}={value}" for key, value in sorted(outcomes.items())),
+                    pseudonym.for_log(patient_id))
+    return decided
+
+
+def _apply_one_decision(
+    repo: Repository, row, decision: dict, blob: str, session: DetectorSession, open_rows,
+) -> str | None:
+    """Aplica uma decisão; devolve o que de fato mudou (pra contagem no log)."""
+    verdict = decision["decisao"]
+    evidence = decision["evidence"] if quote_in_notes(decision["evidence"], blob) else None
+    quoted = session.notes_containing(evidence) if evidence else []
+    evidence_iso = quoted[-1].timestamp if quoted else None
+    if verdict in (DECISION_RESOLVED, DECISION_CANCELLED):
+        action = ACTION_RESOLVE if verdict == DECISION_RESOLVED else ACTION_CANCEL
+        agrees = session.agrees(row, action)
+        if agrees:
+            # Interconsulta/exame/punção: o detector, olhando a internação
+            # inteira (com a checagem de conflito), prova o mesmo -- ele
+            # encerra no fim desta análise, com a evidência dele.
+            return "ia_confirmada_pelo_detector"
+        closure_iso = None
+        if agrees is None and evidence:
+            absorbed = [(item["timestamp"], item["text"]) for item in repo.get_pending_item_evidence(row["pending_id"])]
+            closure_iso = _ai_closure_evidence_date(row, evidence, action, session, open_rows, absorbed)
+        if closure_iso is None:
+            # Item já em verificação fica como está (quem pôs continua
+            # registrado -- a IA não tira do detector o que ele segurou).
+            changed = repo.set_pending_in_review(
+                row["pending_id"], actor=RESOLUTION_LLM, evidence=evidence,
+                note="A IA indicou que foi encerrada, mas o trecho citado não comprova -- confira.",
+            )
+            return "ia_em_verificacao" if changed else None
+        if verdict == DECISION_RESOLVED:
+            changed = repo.resolve_pending_item(
+                row["pending_id"], source=RESOLUTION_LLM, evidence=evidence, evidence_date=closure_iso,
+                resolved_at=resolution_time_utc(closure_iso, row["created_at"]),
+                note="Concluída automaticamente pela IA, com o trecho citado como evidência.",
+            )
+            return "ia_concluidas" if changed else None
+        changed = repo.cancel_pending_item(
+            row["pending_id"], source=RESOLUTION_LLM, evidence=evidence, evidence_date=closure_iso,
+            resolved_at=resolution_time_utc(closure_iso, row["created_at"]),
+            note="Cancelada pela IA: a equipe retirou a indicação, conforme o trecho citado.",
+        )
+        return "ia_canceladas" if changed else None
+    if verdict == DECISION_UNCERTAIN:
+        changed = repo.set_pending_in_review(
+            row["pending_id"], actor=RESOLUTION_LLM, evidence=evidence, evidence_date=evidence_iso,
+            note="A IA não encontrou registro suficiente para decidir -- confira.",
+        )
+        return "ia_em_verificacao" if changed else None
+    # MANTIDA
+    if evidence:
+        repo.add_pending_item_evidence(row["pending_id"], evidence_iso, evidence)
+    return "ia_reativadas" if _reactivate_if_ai_put_in_review(repo, row, evidence, evidence_iso) else None
+
+
+def _reactivate_if_ai_put_in_review(repo: Repository, row, evidence: str | None, evidence_iso: str | None) -> bool:
+    """A IA volta a confirmar uma pendência que ELA mesma tinha deixado em
+    verificação (incerta, ou encerramento com trecho que não comprovou) ->
+    ativa de novo. Em verificação por
+    outro motivo (detector achou "exame realizado" sem laudo; regra antiga
+    sem especialidade) fica como está -- senão alternaria a cada execução."""
+    if row["status"] != PENDING_IN_REVIEW or repo.last_review_actor(row["pending_id"]) != RESOLUTION_LLM:
+        return False
+    return repo.reactivate_pending_item(
+        row["pending_id"], actor=RESOLUTION_LLM, evidence=evidence, evidence_date=evidence_iso,
+        note="A IA voltou a confirmar que a pendência segue aberta.",
+    )

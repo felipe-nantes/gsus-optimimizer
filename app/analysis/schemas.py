@@ -11,6 +11,8 @@ validação (app/analysis/priority.py, RF-24), nunca pedida ao LLM.
 """
 from __future__ import annotations
 
+import unicodedata
+
 from app.analysis.priority import VALID_NECESSIDADE_HOSPITALAR
 from app.analysis.taxonomy import VALID_ORIGINS, is_valid_category, is_valid_subtype
 
@@ -47,7 +49,20 @@ REQUIRED_PENDING_ITEM_FIELDS = {
     "is_inferred": bool,
 }
 
-OPTIONAL_PENDING_ITEM_STRING_FIELDS = ("subcategory", "evidence_date", "origin", "confidence", "flow_status")
+# `alvo` (PEND-001, contrato v2): o que a pendência espera -- especialidade,
+# exame ou procedimento. Normalizado depois (specialty_evaluation), nunca
+# confiado como veio.
+OPTIONAL_PENDING_ITEM_STRING_FIELDS = ("subcategory", "evidence_date", "origin", "confidence", "flow_status", "alvo")
+
+# PEND-001 (contrato v2, DEC-129 seção 3): decisão da IA sobre cada pendência
+# já registrada, pelo código que o prompt deu (P1, P2...). "Sumiu da
+# resposta" deixou de concluir pendência; decisão omitida mantém o estado.
+DECISION_KEPT = "MANTIDA"
+DECISION_RESOLVED = "CONCLUIDA"
+DECISION_CANCELLED = "CANCELADA"
+DECISION_UNCERTAIN = "INCERTA"
+VALID_DECISIONS = {DECISION_KEPT, DECISION_RESOLVED, DECISION_CANCELLED, DECISION_UNCERTAIN}
+REVIEW_FIELD = "revisao_pendencias"
 
 # LLMs pequenos às vezes escrevem a palavra "null" como STRING em vez do
 # valor JSON null (visto em execução real 2026-08-24 -- ver DECISIONS.md
@@ -94,10 +109,54 @@ def normalize_null_sentinels(data: object) -> object:
             for field in OPTIONAL_PENDING_ITEM_STRING_FIELDS:
                 if _is_null_sentinel(new_item.get(field)):
                     new_item[field] = None
+            # Campo novo do v2: tipo errado vira "sem alvo", nunca uma
+            # tentativa de reparo (cada uma custa 80 s+ no hardware fraco).
+            if "alvo" in new_item and not isinstance(new_item["alvo"], str):
+                new_item["alvo"] = None
             new_items.append(new_item)
         normalized["pending_items"] = new_items
 
+    normalized[REVIEW_FIELD] = normalize_review_decisions(normalized.get(REVIEW_FIELD))
     return normalized
+
+
+def _fold_upper(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).strip().upper()
+
+
+def _optional_text(value: object) -> str | None:
+    if not isinstance(value, str) or _is_null_sentinel(value) or not value.strip():
+        return None
+    return value.strip()
+
+
+def normalize_review_decisions(raw: object) -> list[dict]:
+    """`revisao_pendencias` limpa, nunca um motivo de reparo: entrada que não
+    dá pra entender é descartada (= decisão omitida, o estado fica como
+    está). CONCLUIDA/CANCELADA sem trecho de evidência viram INCERTA -- a IA
+    acha que acabou mas não mostrou onde: o auditor confere."""
+    if not isinstance(raw, list):
+        return []
+    decisions: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        ref = entry.get("ref")
+        decision = entry.get("decisao")
+        if not isinstance(ref, str) or not isinstance(decision, str):
+            continue
+        decision = _fold_upper(decision)
+        if decision not in VALID_DECISIONS:
+            continue
+        evidence = _optional_text(entry.get("evidence"))
+        if decision in (DECISION_RESOLVED, DECISION_CANCELLED) and evidence is None:
+            decision = DECISION_UNCERTAIN
+        decisions.append({
+            "ref": _fold_upper(ref), "decisao": decision, "evidence": evidence,
+            "evidence_date": _optional_text(entry.get("evidence_date")),
+        })
+    return decisions
 
 
 def _validate_pending_item(item: object, index: int) -> list[str]:

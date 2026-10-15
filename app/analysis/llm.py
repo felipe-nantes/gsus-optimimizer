@@ -178,22 +178,21 @@ SYSTEM_PROMPT = (
     "incerteza (\"possível pendência\", \"resultado não encontrado nos registros "
     "analisados\") -- nunca afirme causalidade não documentada (nunca \"o hospital "
     "atrasou\").\n"
-    "- edd_data só é preenchida se uma data de previsão de alta estiver EXPLICITAMENTE "
-    "registrada no texto -- nunca estimada por você.\n"
-    "- origem_internacao só é preenchida se a origem (ex.: emergência, eletiva, "
-    "transferência de outro serviço/hospital) estiver EXPLICITAMENTE registrada no "
-    "texto fornecido -- normalmente só aparece na nota de admissão, então null é a "
-    "resposta correta na maioria das evoluções incrementais.\n"
+    "- edd_data (data de previsão de alta) e origem_internacao (emergência, eletiva, "
+    "transferência) só quando EXPLICITAMENTE escritas no texto -- nunca estimadas; senão null.\n"
     "- dia_classificacao=VERMELHO exige dia_causa preenchida.\n"
     "- Se não houver informação suficiente para analisar, responda somente com "
     "insufficient_information=true.\n"
-    "- Campos que aceitam ausência de valor (edd_data, dia_causa, subcategory, "
-    "evidence_date, origin, confidence, flow_status) devem usar o valor JSON null "
-    "quando não houver informação -- NUNCA a palavra \"null\" como texto entre "
-    "aspas.\n"
-    "- edd_status, necessidade_hospitalar, dia_classificacao e category NUNCA "
-    "aceitam null nem a palavra \"null\" -- são obrigatórios, sempre um dos valores "
-    "fechados listados para cada um.\n"
+    "- Sem informação, use o valor JSON null (nunca o texto \"null\") nos campos opcionais. "
+    "edd_status, necessidade_hospitalar, dia_classificacao, category e decisao são "
+    "obrigatórios: sempre um dos valores listados.\n"
+    # PEND-001 (pedido do auditor, DEC-129 seção 3): contrato v2.
+    "- PENDÊNCIAS REGISTRADAS (P1, P2...): em revisao_pendencias, só as que MUDARAM: "
+    "CONCLUIDA (evidência posterior de execução, resultado ou avaliação), CANCELADA "
+    "(indicação retirada) ou INCERTA (registro conflitante ou insuficiente). A que segue "
+    "aberta pode ficar de fora. CONCLUIDA e CANCELADA exigem evidence com o trecho exato.\n"
+    "- pending_items é só para pendências NOVAS, cada uma com alvo: a especialidade, o exame "
+    "ou o procedimento esperado (ex.: INFECTOLOGIA, TOMOGRAFIA DE CRÂNIO).\n"
     "- necessidade_hospitalar, current_status e dia_classificacao descrevem a "
     "situação de HOJE: baseie-os SEMPRE na evolução marcada como \"EVOLUÇÃO MÉDICA MAIS "
     "RECENTE\", nunca em evoluções anteriores. Se a mais recente contradiz uma "
@@ -209,11 +208,9 @@ SYSTEM_PROMPT = (
     "- ENFERMAGEM e EQUIPE MULTIPROFISSIONAL são apoio: sinais e eventos objetivos (febre, "
     "taquicardia, dispneia, dessaturação, alteração neurológica, dor, evacuação, diurese) e "
     "assuntos da própria área. Nunca substituem a conduta ou a pendência definida pelo médico.\n"
-    "- Interconsulta: evolução posterior ao pedido feita pela especialidade (cargo do autor, "
-    "ex.: \"Médico infectologista\", ou linha iniciada por \"PELA <ESPECIALIDADE>\") indica que "
-    "a avaliação foi feita -- não mantenha \"aguarda avaliação\" dessa especialidade; se o "
-    "especialista pediu algo novo (exame, procedimento, reavaliação), registre essa nova "
-    "pendência específica.\n"
+    "- Interconsulta: evolução posterior ao pedido feita pela especialidade (cargo do autor ou "
+    "linha \"PELA <ESPECIALIDADE>\") = avaliação feita: CONCLUIDA. Se o especialista pediu algo "
+    "novo, registre essa nova pendência.\n"
     "- Anotação de enfermagem sobre punção, contato ou presença de um serviço não é pendência "
     "quando o atendimento já foi realizado.\n\n"
     "LOCALIZAÇÃO: unidade e leito são os do bloco LOCALIZAÇÃO ATUAL (censo do GSUS). Não "
@@ -242,21 +239,22 @@ SYSTEM_PROMPT = (
     "escreveu.\n\n"
     "CATEGORIAS E SUBTIPOS VÁLIDOS:\n" + _taxonomy_prompt_block() + "\n\n"
     "Responda SOMENTE com um objeto JSON no formato:\n"
-    '{"clinical_context": "2 a 4 linhas: motivo da internação, problema principal atual, '
-    'intervenções relevantes e o que mantém a internação", '
-    '"current_status": "uma frase: situação clínica de hoje", '
+    '{"clinical_context": "2 a 4 linhas", '
+    '"current_status": "uma frase: situação de hoje", '
     '"necessidade_hospitalar": "SIM|PROVAVELMENTE_SIM|INCERTO|POSSIVELMENTE_NAO|NAO_IDENTIFICADA", '
-    '"necessidade_hospitalar_justificativa": "uma frase com evidência, sem repetir o contexto", '
-    '"objetivo_terapeutico": "meta clínica para a alta", '
-    '"proximo_passo": "próxima ação concreta para a alta", '
-    '"origem_internacao": "string (ex.: emergência, eletiva, transferência) ou null", '
+    '"necessidade_hospitalar_justificativa": "uma frase", '
+    '"objetivo_terapeutico": "meta para a alta", '
+    '"proximo_passo": "próxima ação concreta", '
+    '"origem_internacao": "string ou null", '
     '"edd_data": "AAAA-MM-DD ou null", '
     '"edd_status": "REGISTRADA|NAO_REGISTRADA|VENCIDA", '
     '"dia_classificacao": "VERDE|VERMELHO", '
     '"dia_causa": "frase curta ou null", '
+    '"revisao_pendencias": [{"ref": "P1", "decisao": "MANTIDA|CONCLUIDA|CANCELADA|INCERTA", '
+    '"evidence": "string ou null", "evidence_date": "string ou null"}], '
     '"pending_items": [{"category": "string", "subcategory": "string ou null", '
-    '"description": "string", "evidence": "string", "evidence_date": "string ou null", '
-    '"origin": "INTERNA|EXTERNA ou null", "is_inferred": false, '
+    '"alvo": "string ou null", "description": "string", "evidence": "string", '
+    '"evidence_date": "string ou null", "origin": "INTERNA|EXTERNA ou null", "is_inferred": false, '
     '"confidence": "ALTA|MEDIA|BAIXA ou null", "flow_status": "string ou null"}], '
     '"insufficient_information": false}'
 )
@@ -313,15 +311,22 @@ def build_prompt(
         lines.append("")
 
     if active_pending_items:
-        lines.append("PENDÊNCIAS AINDA ABERTAS DA ÚLTIMA ANÁLISE (reavalie se continuam):")
-        for item in active_pending_items:
+        # PEND-001 (contrato v2): cada pendência ganha um código (P1, P2...)
+        # e a IA devolve uma decisão por código em `revisao_pendencias`.
+        lines.append("PENDÊNCIAS REGISTRADAS (em revisao_pendencias, pelo código, só as que mudaram):")
+        for index, item in enumerate(active_pending_items, start=1):
+            ref = item.get("ref") or f"P{index}"
             date_part = f" (desde {item['evidence_date']})" if item.get("evidence_date") else ""
             # subcategory incluído (achado real, DEC-064): sem isso o LLM não
             # tinha como saber o subtipo já registrado, o que aumentava a
             # chance de reportar um subtipo diferente pra mesma pendência
             # real e quebrar o casamento entre execuções.
-            subcategory_part = f" [{item['subcategory']}]" if item.get("subcategory") else ""
-            lines.append(f"- [{item['category']}]{subcategory_part} {item['description']}{date_part}")
+            subcategory_part = f"/{item['subcategory']}" if item.get("subcategory") else ""
+            alvo_part = f" -- alvo {item['alvo']}" if item.get("alvo") else ""
+            review_part = " (em verificação)" if item.get("status") == "IN_REVIEW" else ""
+            lines.append(
+                f"- {ref} [{item['category']}{subcategory_part}] {item['description']}{alvo_part}{date_part}{review_part}"
+            )
         lines.append("")
 
     # Achado real 2026-08-24 (DEC-058): o LLM justificou necessidade_hospitalar

@@ -74,7 +74,7 @@ def _base_analysis(**overrides) -> dict:
     return base
 
 
-def _note(text="texto", timestamp="2026-08-20T08:00:00") -> StructuredNote:
+def _note(text="Solicitada tomografia de tórax.", timestamp="2026-08-20T08:00:00") -> StructuredNote:
     return StructuredNote(timestamp=timestamp, specialty="Clínica Médica", source_type="Evolução", text=text)
 
 
@@ -116,8 +116,8 @@ def test_reiteration_adds_evidence_instead_of_duplicating_pending_item(repo):
         _base_analysis(pending_items=[_pending_item(evidence="Mantém aguardo de tomografia.", evidence_date="2026-08-21T08:00:00")]),
     ])
 
-    _run_llm_analysis(repo, patient_id, llm, [_note()])
-    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T08:00:00")])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Solicitada tomografia.")])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Mantém aguardo de tomografia.", timestamp="2026-08-21T08:00:00")])
 
     active = repo.get_active_pending_items(patient_id)
     assert len(active) == 1
@@ -131,24 +131,25 @@ def test_reiteration_adds_evidence_instead_of_duplicating_pending_item(repo):
     assert evidences[0]["timestamp"] == "2026-08-21T08:00:00"
 
 
-def test_pending_item_not_reconfirmed_gets_resolved(repo):
+def test_pending_item_missing_from_the_answer_keeps_its_state(repo):
+    """PEND-001 (DEC-129, decisão 3): "sumiu da resposta" deixou de concluir
+    -- antes era a ÚNICA regra de fechamento, sem evidência nenhuma. Decisão
+    omitida mantém o estado."""
     patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
     llm = StubLLMSequence([
         _base_analysis(pending_items=[_pending_item()]),
-        _base_analysis(pending_items=[]),  # resolvido -- LLM não reconfirma
+        _base_analysis(pending_items=[]),
     ])
 
     _run_llm_analysis(repo, patient_id, llm, [_note()])
     first_pending_id = repo.get_active_pending_items(patient_id)[0]["pending_id"]
-
     _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T08:00:00")])
 
-    assert repo.get_active_pending_items(patient_id) == []
-    row = repo.conn.execute("SELECT status FROM pending_items WHERE pending_id = ?", (first_pending_id,)).fetchone()
-    assert row["status"] == "RESOLVED"
+    [row] = repo.get_active_pending_items(patient_id)
+    assert (row["pending_id"], row["status"]) == (first_pending_id, "ACTIVE")
 
 
-def test_new_category_creates_new_item_and_resolves_the_old_one(repo):
+def test_new_category_creates_new_item_and_keeps_the_old_one(repo):
     patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
     llm = StubLLMSequence([
         _base_analysis(pending_items=[_pending_item(category="DIAGNOSTICO", subcategory="AGUARDA_EXAME_IMAGEM_OU_LABORATORIAL")]),
@@ -161,15 +162,8 @@ def test_new_category_creates_new_item_and_resolves_the_old_one(repo):
     _run_llm_analysis(repo, patient_id, llm, [_note()])
     _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T08:00:00")])
 
-    active = repo.get_active_pending_items(patient_id)
-    assert len(active) == 1
-    assert active[0]["category"] == "INTERCONSULTA"
-
-    all_rows = repo.conn.execute("SELECT category, status FROM pending_items WHERE patient_id = ?", (patient_id,)).fetchall()
-    assert len(all_rows) == 2
-    statuses = {row["category"]: row["status"] for row in all_rows}
-    assert statuses["DIAGNOSTICO"] == "RESOLVED"
-    assert statuses["INTERCONSULTA"] == "ACTIVE"
+    statuses = {row["category"]: row["status"] for row in repo.get_active_pending_items(patient_id)}
+    assert statuses == {"DIAGNOSTICO": "ACTIVE", "INTERCONSULTA": "ACTIVE"}
 
 
 def test_pending_items_are_tagged_with_llm_source(repo):
@@ -277,8 +271,8 @@ def test_stage_progression_category_matches_by_category_alone(repo):
         )]),
     ])
 
-    _run_llm_analysis(repo, patient_id, llm, [_note()])
-    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-22T08:00:00")])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Solicitado parecer de cardiologia.")])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Cardiologia avaliou, aguarda conduta.", timestamp="2026-08-22T08:00:00")])
 
     active = repo.get_active_pending_items(patient_id)
     assert len(active) == 1  # não duplicou apesar do subtipo ter mudado
@@ -616,13 +610,16 @@ def test_llm_dates_in_br_format_are_normalized_before_saving(repo):
     assert [row["timestamp"] for row in extra] == ["2026-08-21T09:15:00"]
 
 
-def test_llm_unrecognized_evidence_date_becomes_null_never_a_guess(repo):
+def test_llm_unrecognized_evidence_date_is_never_a_guess(repo):
+    """Data ilegível da IA e trecho fora das evoluções gravadas: vale a
+    evolução mais nova que a IA leu (o pedido está em algum ponto dela) --
+    nunca um palpite anterior (2ª revisão adversarial)."""
     patient_id = repo.upsert_patient(_patient())
     llm = StubLLMSequence([_base_analysis(pending_items=[_pending_item(evidence_date="semana passada")])])
 
     _run_llm_analysis(repo, patient_id, llm, [_note()])
 
-    assert repo.get_active_pending_items(patient_id)[0]["evidence_date"] is None
+    assert repo.get_active_pending_items(patient_id)[0]["evidence_date"] == "2026-08-20T08:00:00"
 
 
 def test_process_patient_ignores_notes_dated_before_current_admission(repo):
@@ -912,3 +909,527 @@ def test_reference_physician_note_never_comes_from_a_previous_admission(repo):
     nursing = StructuredNote(timestamp="2026-08-20T22:00:00", specialty=None, source_type="Enfermeiro", text="x")
     _run_llm_analysis(repo, patient_id, RecordingLLM([_base_analysis()]), [nursing])
     assert seen == [["Enfermeiro"]]
+
+
+# ============================================================== PEND-001
+# Ciclo de vida das pendências (pedido do auditor, DEC-129 seções 3 e 4):
+# contrato v2 (alvo + decisão por pendência), casamento por (categoria,
+# alvo) entre regra e IA, detector na Fase 1. Texto clínico fictício.
+
+
+class RecordingStubLLM(StubLLMSequence):
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.seen_pending = []
+
+    def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
+        self.seen_pending.append(list(active_pending_items or []))
+        return super().analyze_patient(previous_state, new_notes, active_pending_items, patient_context)
+
+
+def _consult(specialty="infectologia", evidence_date="2026-08-20T08:00:00", **overrides):
+    overrides.setdefault("evidence", f"Solicito avaliação da {specialty}.")
+    return _pending_item(
+        category="INTERCONSULTA", subcategory="SOLICITADA", description=f"Aguarda avaliação da {specialty}",
+        evidence_date=evidence_date, **overrides,
+    )
+
+
+def _status_of(repo, pending_id):
+    return repo.conn.execute("SELECT * FROM pending_items WHERE pending_id = ?", (pending_id,)).fetchone()
+
+
+def _add_db_note(repo, patient_id, timestamp, text, role="Médico residente"):
+    from app.extraction.hashing import compute_note_hash
+
+    repo.add_note(Note(patient_id=patient_id, source_type=role, specialty=None, timestamp=timestamp, text=text,
+                       text_hash=compute_note_hash(timestamp, role, None, text)))
+
+
+def _one_open_consult(repo, patient_id):
+    _run_llm_analysis(repo, patient_id, StubLLMSequence([_base_analysis(pending_items=[_consult()])]), [_note()])
+    [row] = repo.get_active_pending_items(patient_id)
+    return row
+
+
+def test_prompt_lists_registered_items_with_codes_target_and_status(repo):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    row = _one_open_consult(repo, patient_id)
+    llm = RecordingStubLLM([_base_analysis()])
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T08:00:00")])
+
+    [[item]] = llm.seen_pending
+    assert item["ref"] == "P1"
+    assert item["alvo"] == "INFECTOLOGIA"
+    assert item["status"] == "ACTIVE"
+    assert row["alvo"] == "INFECTOLOGIA"
+
+
+def test_two_consults_of_different_specialties_are_two_items(repo):
+    """Causa nº 1 da queixa do auditor (DEC-129, achado 1): interconsulta da
+    IA casava só pela CATEGORIA -- infecto e reumato viravam uma só."""
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    llm = StubLLMSequence([
+        _base_analysis(pending_items=[_consult("infectologia")]),
+        _base_analysis(pending_items=[_consult("reumatologia", evidence_date="2026-08-21T08:00:00")]),
+    ])
+    _run_llm_analysis(repo, patient_id, llm, [_note()])
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T08:00:00")])
+
+    assert {r["alvo"] for r in repo.get_active_pending_items(patient_id)} == {"INFECTOLOGIA", "REUMATOLOGIA"}
+
+
+def test_decision_concluida_with_verified_evidence_resolves_with_source_and_evidence(repo):
+    """A Fase 1 grava as evoluções antes da IA; a decisão só vale se a
+    evolução citada estiver no banco, for posterior ao pedido e o detector
+    concordar (aqui, a linha "PELA INFECTOLOGIA"). Concordando, quem encerra
+    é o detector, com a evidência dele (2ª revisão: a mesma decisão nos dois
+    caminhos, inclusive a checagem de conflito)."""
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    row = _one_open_consult(repo, patient_id)
+    text = "PELA INFECTOLOGIA\nManter antibiótico por 7 dias."
+    _add_db_note(repo, patient_id, "2026-08-21T10:00:00", text)
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[{
+        "ref": "P1", "decisao": "CONCLUIDA", "evidence": "Manter antibiótico por 7 dias.",
+        "evidence_date": "30/12/2026 10:00",  # data da IA é ignorada: vale a da evolução citada
+    }])])
+    _run_llm_analysis(repo, patient_id, llm, [_note(text, timestamp="2026-08-21T10:00:00")])
+
+    after = _status_of(repo, row["pending_id"])
+    assert after["status"] == "RESOLVED"
+    assert after["resolution_source"] == "DETECTOR"
+    assert after["resolution_evidence"] == "PELA INFECTOLOGIA Manter antibiótico por 7 dias."
+    assert after["resolution_evidence_date"] == "2026-08-21T10:00:00"
+    assert after["resolved_at"] is not None
+
+
+@pytest.mark.parametrize("quote,note_text", [
+    # Revisão adversarial: a IA "concluía" com a frase de espera, com o
+    # próprio pedido, ou com a resposta de outra especialidade.
+    ("Segue aguardando avaliação da infectologia, ainda não respondida.",
+     "Segue aguardando avaliação da infectologia, ainda não respondida."),
+    ("Solicito avaliação da infectologia.", "Solicito avaliação da infectologia."),
+    ("Nefrologia avaliou: sem indicação de diálise.", "PELA NEFROLOGIA\nNefrologia avaliou: sem indicação de diálise."),
+])
+def test_ai_conclusion_that_does_not_prove_the_item_goes_to_review(repo, quote, note_text):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    row = _one_open_consult(repo, patient_id)
+    _add_db_note(repo, patient_id, "2026-08-21T10:00:00", note_text)
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[{"ref": "P1", "decisao": "CONCLUIDA", "evidence": quote}])])
+    _run_llm_analysis(repo, patient_id, llm, [_note(note_text, timestamp="2026-08-21T10:00:00")])
+
+    assert _status_of(repo, row["pending_id"])["status"] == "IN_REVIEW"
+
+
+def test_ai_conclusion_quoting_a_note_older_than_the_request_goes_to_review(repo):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    _add_db_note(repo, patient_id, "2026-08-18T10:00:00", "PELA INFECTOLOGIA\nSem antibiótico no momento.")
+    row = _one_open_consult(repo, patient_id)  # pedido de 20/08
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[{
+        "ref": "P1", "decisao": "CONCLUIDA", "evidence": "Sem antibiótico no momento."}])])
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T10:00:00")])
+
+    assert _status_of(repo, row["pending_id"])["status"] == "IN_REVIEW"
+
+
+def test_ai_conclusion_of_a_kind_the_detector_does_not_know(repo):
+    """Terapêutica/transferência: evolução posterior ao pedido, trecho que
+    não é de espera."""
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    item = _pending_item(category="TRANSFERENCIA", subcategory="VAGA_OUTRO_HOSPITAL_UTI_OU_ENFERMARIA",
+                         description="Aguarda vaga em enfermaria", evidence="Aguarda vaga em enfermaria.")
+    _run_llm_analysis(repo, patient_id, StubLLMSequence([_base_analysis(pending_items=[item])]), [_note()])
+    [row] = repo.get_active_pending_items(patient_id)
+    _add_db_note(repo, patient_id, "2026-08-22T10:00:00", "Transferido para a enfermaria hoje às 10h.")
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[{
+        "ref": "P1", "decisao": "CONCLUIDA", "evidence": "Transferido para a enfermaria hoje às 10h."}])])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Transferido para a enfermaria hoje às 10h.", timestamp="2026-08-22T10:00:00")])
+
+    assert _status_of(repo, row["pending_id"])["status"] == "RESOLVED"
+
+
+def test_decision_concluida_without_evidence_goes_to_review_not_closed(repo):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    row = _one_open_consult(repo, patient_id)
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[{"ref": "P1", "decisao": "CONCLUIDA"}])])
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T10:00:00")])
+
+    assert _status_of(repo, row["pending_id"])["status"] == "IN_REVIEW"
+
+
+def test_caso6_uncertain_goes_to_human_review_and_stays_visible(repo):
+    """Caso 6 de aceitação (parte automática; a marcação manual é o
+    PEND-002): sem evidência suficiente de conclusão, o item vai pra
+    verificação humana -- continua aberto, no relatório e no censo."""
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    row = _one_open_consult(repo, patient_id)
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[{
+        "ref": "p1", "decisao": "incerta", "evidence": None, "evidence_date": None,
+    }])])
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T10:00:00")])
+
+    [open_row] = repo.get_active_pending_items(patient_id)
+    assert (open_row["pending_id"], open_row["status"]) == (row["pending_id"], "IN_REVIEW")
+    assert [r["pending_id"] for r in repo.get_all_active_pending_items()] == [row["pending_id"]]
+
+
+def test_ai_confirming_again_reactivates_what_it_put_in_review(repo):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    row = _one_open_consult(repo, patient_id)
+    llm = StubLLMSequence([
+        _base_analysis(revisao_pendencias=[{"ref": "P1", "decisao": "INCERTA"}]),
+        _base_analysis(revisao_pendencias=[{
+            "ref": "P1", "decisao": "MANTIDA", "evidence": "Segue aguardando infectologia.",
+            "evidence_date": "2026-08-22T08:00:00",
+        }]),
+    ])
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T08:00:00")])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Segue aguardando infectologia.", timestamp="2026-08-22T08:00:00")])
+
+    assert _status_of(repo, row["pending_id"])["status"] == "ACTIVE"
+    [extra] = repo.get_pending_item_evidence(row["pending_id"])
+    assert extra["text"] == "Segue aguardando infectologia."
+
+
+def test_ai_does_not_reactivate_what_the_detector_put_in_review(repo):
+    """Senão alternaria a cada execução (detector põe, IA tira)."""
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    exam = _pending_item(description="Aguarda tomografia de crânio", evidence="Solicitada TC de crânio.")
+    _run_llm_analysis(repo, patient_id, StubLLMSequence([_base_analysis(pending_items=[exam])]), [_note()])
+    [row] = repo.get_active_pending_items(patient_id)
+    repo.set_pending_in_review(row["pending_id"], actor="DETECTOR", note="exame realizado, resultado não localizado")
+
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[{"ref": "P1", "decisao": "MANTIDA"}])])
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T08:00:00")])
+
+    assert _status_of(repo, row["pending_id"])["status"] == "IN_REVIEW"
+
+
+def test_decision_cancelada(repo):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    row = _one_open_consult(repo, patient_id)
+    text = "Suspenso o parecer da infectologia por melhora clínica."
+    _add_db_note(repo, patient_id, "2026-08-21T10:00:00", text, role="Médico clínico")
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[{
+        "ref": "P1", "decisao": "CANCELADA", "evidence": text, "evidence_date": None,
+    }])])
+    _run_llm_analysis(repo, patient_id, llm, [_note(text, timestamp="2026-08-21T10:00:00")])
+
+    after = _status_of(repo, row["pending_id"])
+    assert (after["status"], after["resolution_source"]) == ("CANCELLED", "DETECTOR")
+
+
+def test_unknown_or_repeated_codes_are_ignored(repo):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    row = _one_open_consult(repo, patient_id)
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[
+        {"ref": "P7", "decisao": "CONCLUIDA", "evidence": "x"},
+        {"ref": "P1", "decisao": "MANTIDA"},
+        {"ref": "P1", "decisao": "CONCLUIDA", "evidence": "segunda decisão pro mesmo código"},
+        "lixo",
+    ])])
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T10:00:00")])
+
+    assert _status_of(repo, row["pending_id"])["status"] == "ACTIVE"
+
+
+def test_ai_decides_rule_items_too(repo):
+    patient = _patient()
+    patient_id = repo.upsert_patient(patient)
+    _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(_EXAM_NOTE))
+    [rule_row] = repo.get_active_pending_items(patient_id)
+
+    _add_db_note(repo, patient_id, "2026-08-21T09:00:00", "TC de tórax normal.", role="Médico clínico")
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[{
+        "ref": "P1", "decisao": "CONCLUIDA", "evidence": "TC de tórax normal.", "evidence_date": "2026-08-21T09:00:00",
+    }])])
+    _run_llm_analysis(repo, patient_id, llm, [_note("TC de tórax normal.", timestamp="2026-08-21T09:00:00")])
+
+    assert _status_of(repo, rule_row["pending_id"])["status"] == "RESOLVED"
+
+
+def test_llm_item_with_the_same_target_as_a_rule_item_is_not_a_duplicate(repo):
+    patient = _patient()
+    patient_id = repo.upsert_patient(patient)
+    _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(_EXAM_NOTE))
+    [rule_row] = repo.get_active_pending_items(patient_id)
+    assert rule_row["alvo"] == "TOMOGRAFIA DE TÓRAX"
+
+    llm = StubLLMSequence([_base_analysis(pending_items=[_pending_item(
+        description="Aguarda TC de tórax", alvo="tomografia de tórax", evidence="Mantém aguardando TC de tórax.",
+        evidence_date="2026-08-21T08:00:00",
+    )])])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Mantém aguardando TC de tórax.", timestamp="2026-08-21T08:00:00")])
+
+    [row] = repo.get_active_pending_items(patient_id)
+    assert row["pending_id"] == rule_row["pending_id"]
+    assert [e["text"] for e in repo.get_pending_item_evidence(row["pending_id"])] == ["Mantém aguardando TC de tórax."]
+
+
+def test_ai_re_emitting_an_already_answered_request_does_not_reopen_it(repo):
+    """A janela de 14 dias ainda tem o pedido original e a IA tende a
+    reemiti-lo (DEC-129, achado 1)."""
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U", admission_date="2026-08-15"))
+    _add_db_note(repo, patient_id, "2026-08-20T08:00:00", "Solicito avaliação da infectologia.", role="Médico clínico")
+    _add_db_note(repo, patient_id, "2026-08-21T09:00:00", "PELA INFECTOLOGIA\nManter antibiótico.")
+    llm = StubLLMSequence([_base_analysis(pending_items=[_consult()])])
+
+    _run_llm_analysis(repo, patient_id, llm, [_note()])  # cria e o detector já fecha
+    assert repo.get_active_pending_items(patient_id) == []
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-22T08:00:00")])  # reemite o mesmo pedido
+
+    assert repo.get_active_pending_items(patient_id) == []
+    assert len(repo.get_patient_pending_items(patient_id)) == 1
+
+
+def test_a_new_request_after_the_evaluation_is_a_new_item(repo):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U", admission_date="2026-08-15"))
+    _add_db_note(repo, patient_id, "2026-08-20T08:00:00", "Solicito avaliação da infectologia.", role="Médico clínico")
+    _add_db_note(repo, patient_id, "2026-08-21T09:00:00", "PELA INFECTOLOGIA\nManter antibiótico.")
+    rerequest = "Nova febre, solicito reavaliação da infectologia."
+    llm = StubLLMSequence([
+        _base_analysis(pending_items=[_consult()]),
+        _base_analysis(pending_items=[_consult(evidence=rerequest, evidence_date="2026-08-23T08:00:00")]),
+    ])
+    _run_llm_analysis(repo, patient_id, llm, [_note()])
+    assert repo.get_active_pending_items(patient_id) == []  # PELA INFECTOLOGIA fechou
+    _add_db_note(repo, patient_id, "2026-08-23T08:00:00", rerequest, role="Médico clínico")
+    _run_llm_analysis(repo, patient_id, llm, [_note(rerequest, timestamp="2026-08-23T08:00:00")])
+
+    [row] = repo.get_active_pending_items(patient_id)
+    assert row["evidence_date"] == "2026-08-23T08:00:00"
+
+
+# ------------------------------------------------- PEND-001 na Fase 1
+
+_CONSULT_REQUEST_NOTE = (
+    "20/08/2026 08:00 - Profissional Teste Um (Medico clinico)\nSolicito avaliacao da nefrologia.\n\n"
+)
+_NEPHRO_NOTE = (
+    "21/08/2026 10:00 - Profissional Teste Dois (Medico residente)\nPaciente estavel.\n"
+    "PELA NEFROLOGIA\nSem indicacao de dialise.\n\n"
+)
+
+
+def test_phase1_rule_request_and_specialist_note_close_in_the_same_run(repo):
+    patient = _patient()
+    patient_id = repo.upsert_patient(patient)
+    _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(_CONSULT_REQUEST_NOTE + _NEPHRO_NOTE))
+
+    assert repo.get_active_pending_items(patient_id) == []
+    [row] = repo.get_patient_pending_items(patient_id)
+    assert (row["status"], row["resolution_source"], row["alvo"]) == ("RESOLVED", "DETECTOR", "NEFROLOGIA")
+    assert row["resolution_evidence"].startswith("PELA NEFROLOGIA")  # o bloco inteiro, com o conteúdo
+    events = [e["event_type"] for e in repo.get_pending_item_events(row["pending_id"])]
+    assert events == ["CRIADA", "CONCLUIDA"]
+
+
+def test_phase1_request_still_in_the_window_does_not_reopen_every_night(repo):
+    patient = _patient()
+    patient_id = repo.upsert_patient(patient)
+    source = FixedTextRecordSource(_CONSULT_REQUEST_NOTE + _NEPHRO_NOTE)
+    _process_patient_rules(repo, patient, patient_id, source)
+    _process_patient_rules(repo, patient, patient_id, source)
+
+    assert len(repo.get_patient_pending_items(patient_id)) == 1
+
+
+def test_phase1_new_request_after_the_evaluation_opens_a_new_item(repo):
+    """"Reitero parecer" DEPOIS da avaliação é pedido novo -- o pedido
+    original, ainda na janela, não pode escondê-lo."""
+    patient = _patient()
+    patient_id = repo.upsert_patient(patient)
+    rerequest = "22/08/2026 08:00 - Profissional Teste Um (Medico clinico)\nReitero solicitacao de parecer da nefrologia.\n\n"
+    _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(_CONSULT_REQUEST_NOTE + _NEPHRO_NOTE))
+    _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(
+        _CONSULT_REQUEST_NOTE + _NEPHRO_NOTE + rerequest))
+
+    [open_row] = repo.get_active_pending_items(patient_id)
+    assert open_row["evidence_date"] == "2026-08-22T08:00:00"
+    assert len(repo.get_patient_pending_items(patient_id)) == 2
+
+
+def test_phase1_old_request_closes_from_history_outside_the_window(repo):
+    """O pedido de dias atrás fecha: o detector lê a internação inteira do
+    banco, não só a janela que a extração reenviou."""
+    patient = _patient()
+    patient_id = repo.upsert_patient(patient)
+    _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(_CONSULT_REQUEST_NOTE))
+    assert len(repo.get_active_pending_items(patient_id)) == 1
+
+    _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(_NEPHRO_NOTE))
+    assert repo.get_active_pending_items(patient_id) == []
+
+
+def test_phase1_backfills_target_of_old_items_and_flags_old_rule_consults(repo):
+    """Banco anterior ao PEND-001: alvo deduzido da descrição; interconsulta
+    de regra antiga sem especialidade ("Aguarda avaliação de quadro") vai pra
+    verificação -- nunca teria como ser fechada nem casada."""
+    patient = _patient()
+    patient_id = repo.upsert_patient(patient)
+    good = repo.add_pending_item(patient_id, "INTERCONSULTA", "Aguarda avaliação de nefrologia",
+                                 "nota inteira antiga", "2026-08-19T08:00:00", subcategory="SOLICITADA", source="RULE")
+    bad = repo.add_pending_item(patient_id, "INTERCONSULTA", "Aguarda avaliação de quadro",
+                                "nota inteira antiga", "2026-08-19T08:00:00", subcategory="SOLICITADA", source="RULE")
+
+    _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(
+        "22/08/2026 08:00 - Profissional Teste Um (Medico clinico)\nPaciente estavel.\n\n"))
+
+    assert _status_of(repo, good)["alvo"] == "NEFROLOGIA"
+    assert _status_of(repo, good)["status"] == "ACTIVE"
+    assert _status_of(repo, bad)["status"] == "IN_REVIEW"
+
+
+def test_phase1_exam_done_without_result_goes_to_review(repo):
+    patient = _patient()
+    patient_id = repo.upsert_patient(patient)
+    done = "21/08/2026 08:00 - Profissional Teste Um (Medico clinico)\nTomografia de torax realizada.\n\n"
+    _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(_EXAM_NOTE + done))
+
+    [row] = repo.get_active_pending_items(patient_id)
+    assert row["status"] == "IN_REVIEW"
+    [event] = [e for e in repo.get_pending_item_events(row["pending_id"]) if e["event_type"] == "EM_VERIFICACAO"]
+    assert event["actor"] == "DETECTOR"
+    assert "resultado não foi localizado" in event["note"]
+
+
+
+def test_conclusion_whose_quote_is_not_in_the_notes_goes_to_review(repo):
+    """Avaliação real (PEND-001): a IA copiou como "evidência" a linha da
+    lista de pendências do próprio prompt. Nada fecha com trecho que não
+    está nas evoluções -- vai pra conferência do auditor."""
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    row = _one_open_consult(repo, patient_id)
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[{
+        "ref": "P1", "decisao": "CONCLUIDA",
+        "evidence": "Aguarda avaliação da infectologia -- alvo INFECTOLOGIA (desde 2026-08-20T08:00:00)",
+    }])])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Paciente estável.", timestamp="2026-08-21T10:00:00")])
+
+    after = _status_of(repo, row["pending_id"])
+    assert after["status"] == "IN_REVIEW"
+    assert after["resolution_evidence"] is None
+
+
+def test_reiteration_quote_copied_from_the_prompt_is_not_stored_as_evidence(repo):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    row = _one_open_consult(repo, patient_id)
+    llm = StubLLMSequence([_base_analysis(pending_items=[_consult(
+        evidence="Aguarda avaliação da infectologia -- alvo INFECTOLOGIA (desde 2026-08-20T08:00:00)",
+    )])])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Paciente estável.", timestamp="2026-08-21T10:00:00")])
+
+    assert repo.get_pending_item_evidence(row["pending_id"]) == []
+
+
+def test_new_item_whose_own_evidence_shows_it_was_answered_is_dropped(repo):
+    """Avaliação real: "Aguardo avaliação da infectologia." com evidência
+    "Pela INFECTOLOGIA: paciente avaliado." -- a evidência desmente."""
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    llm = StubLLMSequence([_base_analysis(pending_items=[_consult(
+        evidence="Pela INFECTOLOGIA: paciente avaliado.", evidence_date="2026-08-21T15:00:00",
+    )])])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Pela INFECTOLOGIA: paciente avaliado.", timestamp="2026-08-21T15:00:00")])
+
+    assert repo.get_patient_pending_items(patient_id) == []
+
+
+
+def test_ai_re_emitting_a_closed_item_with_an_unverifiable_quote_is_ignored(repo):
+    """Revisão adversarial: a IA reemitia a interconsulta respondida com a
+    data de hoje e um trecho que não está em evolução nenhuma -- o item
+    voltava e nunca mais fechava."""
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U", admission_date="2026-08-15"))
+    _add_db_note(repo, patient_id, "2026-08-20T08:00:00", "Solicito avaliação da infectologia.", role="Médico clínico")
+    _add_db_note(repo, patient_id, "2026-08-21T09:00:00", "PELA INFECTOLOGIA\nManter antibiótico.")
+    llm = StubLLMSequence([
+        _base_analysis(pending_items=[_consult()]),
+        _base_analysis(pending_items=[_consult(evidence="Mantém aguardando parecer da infectologia.",
+                                               evidence_date="22/08/2026 08:00")]),
+    ])
+    _run_llm_analysis(repo, patient_id, llm, [_note()])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Paciente afebril.", timestamp="2026-08-22T08:00:00")])
+
+    assert repo.get_active_pending_items(patient_id) == []
+
+
+def test_new_item_date_comes_from_the_quoted_note_not_from_the_ai(repo):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U", admission_date="2026-08-15"))
+    _add_db_note(repo, patient_id, "2026-08-20T08:00:00", "Solicito avaliação da infectologia.", role="Médico clínico")
+    llm = StubLLMSequence([_base_analysis(pending_items=[_consult(evidence_date="05/08/2026")])])
+    _run_llm_analysis(repo, patient_id, llm, [_note("Solicito avaliação da infectologia.")])
+
+    [row] = repo.get_active_pending_items(patient_id)
+    assert row["evidence_date"] == "2026-08-20T08:00:00"
+
+
+@pytest.mark.parametrize("bad_date", ["15/03/1958", "31/12/9999", "20/09/3026"])
+def test_absurd_ai_dates_never_break_the_analysis(repo, bad_date):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U", admission_date="2026-08-15"))
+    llm = StubLLMSequence([_base_analysis(pending_items=[_consult(evidence="Parecer da cardio pedido.",
+                                                                  evidence_date=bad_date)])])
+    _run_llm_analysis(repo, patient_id, llm, [_note()])
+
+    [row] = repo.get_active_pending_items(patient_id)
+    assert row["evidence_date"] == "2026-08-20T08:00:00"  # a evolução que a IA leu, nunca a data absurda
+
+
+def test_generic_items_with_different_targets_are_not_merged(repo):
+    """Revisão adversarial: "traqueostomia" virava evidência da colecistectomia."""
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    first = _pending_item(category="PROCEDIMENTO_CIRURGIA", subcategory="INDICACAO_DEFINIDA_AGUARDANDO_CIRURGIA",
+                          description="Aguarda colecistectomia", alvo="colecistectomia", evidence="Indicada colecistectomia.")
+    second = _pending_item(category="PROCEDIMENTO_CIRURGIA", subcategory="INDICACAO_DEFINIDA_AGUARDANDO_CIRURGIA",
+                           description="Aguarda traqueostomia", alvo="traqueostomia", evidence="Indicada traqueostomia.")
+    llm = StubLLMSequence([_base_analysis(pending_items=[first]), _base_analysis(pending_items=[second])])
+    _run_llm_analysis(repo, patient_id, llm, [_note()])
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T08:00:00")])
+
+    assert {row["alvo"] for row in repo.get_active_pending_items(patient_id)} == {"COLECISTECTOMIA", "TRAQUEOSTOMIA"}
+
+
+def test_prompt_lists_at_most_twelve_registered_items_in_review_first(repo):
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    ids = [repo.add_pending_item(patient_id, "TERAPEUTICA", f"Pendência {i}", f"evid {i}", "2026-08-20T08:00:00",
+                                 source="LLM") for i in range(15)]
+    repo.set_pending_in_review(ids[0], actor="IA")
+    llm = RecordingStubLLM([_base_analysis()])
+    _run_llm_analysis(repo, patient_id, llm, [_note(timestamp="2026-08-21T08:00:00")])
+
+    [items] = llm.seen_pending
+    assert len(items) == 12
+    assert items[0]["description"] == "Pendência 0" and items[0]["status"] == "IN_REVIEW"
+
+
+def test_rules_or_detector_failure_never_fails_the_patient(repo, monkeypatch):
+    import app.orchestrator as orchestrator_module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("defeito simulado no detector")
+
+    monkeypatch.setattr(orchestrator_module.DetectorSession, "detect", boom)
+    patient = _patient()
+    patient_id = repo.upsert_patient(patient)
+    result = _process_patient_rules(repo, patient, patient_id, FixedTextRecordSource(_CONSULT_REQUEST_NOTE))
+    assert result is not None  # as notas novas seguem pra IA
+    llm = StubLLMSequence([_base_analysis()])
+    _run_llm_analysis(repo, patient_id, llm, [_note()])
+    assert repo.get_patient_state(patient_id) is not None
+
+
+def test_ai_closure_quoting_another_item_s_answer_goes_to_review(repo):
+    """Saída REAL do modelo reaplicada (caso G da avaliação): com os códigos
+    trocados, "P1 CONCLUIDA" citando a evolução da nefrologia caía na
+    pendência de vaga em enfermaria e a fechava. O trecho tem de falar do
+    assunto da própria pendência."""
+    patient_id = repo.upsert_patient(Patient(record_number="1", bed="2A", unit="U"))
+    item = _pending_item(category="TRANSFERENCIA", subcategory="VAGA_OUTRO_HOSPITAL_UTI_OU_ENFERMARIA",
+                         description="Aguarda vaga em enfermaria", evidence="Aguarda vaga em enfermaria.")
+    _run_llm_analysis(repo, patient_id, StubLLMSequence([_base_analysis(pending_items=[item])]), [_note()])
+    [row] = repo.get_active_pending_items(patient_id)
+    quote = "Avaliado a pedido da equipe. Sem indicação de diálise. Sugiro manter hidratação."
+    _add_db_note(repo, patient_id, "2026-08-22T10:00:00", quote, role="Médico nefrologista")
+    llm = StubLLMSequence([_base_analysis(revisao_pendencias=[{"ref": "P1", "decisao": "CONCLUIDA", "evidence": quote}])])
+    _run_llm_analysis(repo, patient_id, llm, [_note(quote, timestamp="2026-08-22T10:00:00")])
+
+    assert _status_of(repo, row["pending_id"])["status"] == "IN_REVIEW"

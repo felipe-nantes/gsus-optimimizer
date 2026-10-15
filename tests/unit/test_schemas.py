@@ -1,4 +1,4 @@
-from app.analysis.schemas import normalize_null_sentinels, validate_analysis_output
+from app.analysis.schemas import normalize_null_sentinels, normalize_review_decisions, validate_analysis_output
 
 
 def _valid_output(**overrides) -> dict:
@@ -292,3 +292,47 @@ def test_normalize_leaves_real_edd_status_untouched():
     data = _valid_output(edd_status="VENCIDA", edd_data="2026-08-20")
     normalized = normalize_null_sentinels(data)
     assert normalized["edd_status"] == "VENCIDA"
+
+
+# --------------------------------------------- PEND-001 (contrato v2, DEC-129)
+
+
+def test_review_decisions_are_normalized_never_a_reason_for_repair():
+    """Cada tentativa de reparo custa 80 s+ no hardware fraco: decisão que
+    não dá pra entender é descartada (= omitida, o estado fica)."""
+    raw = [
+        {"ref": " p1 ", "decisao": "concluída", "evidence": "PELA INFECTOLOGIA", "evidence_date": "21/08/2026 10:00"},
+        {"ref": "P2", "decisao": "MANTIDA", "evidence": "null", "evidence_date": "  "},
+        {"ref": "P3", "decisao": "TALVEZ"},
+        {"ref": 4, "decisao": "MANTIDA"},
+        "lixo",
+    ]
+    assert normalize_review_decisions(raw) == [
+        {"ref": "P1", "decisao": "CONCLUIDA", "evidence": "PELA INFECTOLOGIA", "evidence_date": "21/08/2026 10:00"},
+        {"ref": "P2", "decisao": "MANTIDA", "evidence": None, "evidence_date": None},
+    ]
+    assert normalize_review_decisions(None) == []
+    assert normalize_review_decisions({"P1": "MANTIDA"}) == []
+
+
+def test_closing_decision_without_evidence_becomes_uncertain():
+    decisions = normalize_review_decisions([
+        {"ref": "P1", "decisao": "CONCLUIDA", "evidence": ""},
+        {"ref": "P2", "decisao": "CANCELADA"},
+    ])
+    assert [d["decisao"] for d in decisions] == ["INCERTA", "INCERTA"]
+
+
+def test_normalize_adds_clean_review_list_and_never_fails_on_alvo_type():
+    data = _valid_output()
+    data["pending_items"][0]["alvo"] = ["lista"]
+    normalized = normalize_null_sentinels(data)
+    assert normalized["revisao_pendencias"] == []
+    assert normalized["pending_items"][0]["alvo"] is None
+    assert validate_analysis_output(normalized) == []
+
+
+def test_alvo_null_sentinel_becomes_none():
+    data = _valid_output()
+    data["pending_items"][0]["alvo"] = "null"
+    assert normalize_null_sentinels(data)["pending_items"][0]["alvo"] is None

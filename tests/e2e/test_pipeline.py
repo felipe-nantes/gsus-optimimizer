@@ -448,6 +448,98 @@ def test_pipeline_rule_based_pending_item_resolves_when_exam_completed(tmp_path)
     conn.close()
 
 
+def _patient_id(repo, record_number):
+    return repo.conn.execute(
+        "SELECT patient_id FROM patients WHERE record_number = ?", (record_number,)
+    ).fetchone()["patient_id"]
+
+
+def test_pipeline_pend001_answered_consult_closes_and_specialist_request_opens_new_item(tmp_path):
+    """PEND-001 (caso 2 do auditor + seção 4): pedido -> evolução "PELA
+    NEFROLOGIA" -> interconsulta concluída automaticamente, com evidência e
+    histórico; o exame que o especialista pediu vira pendência NOVA."""
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    census = FixtureCensusSource([Patient(record_number="100", bed="2A", unit=UNIT)])
+    records = FixtureRecordSource({"100": "consult_answered_by_specialty.txt"})
+    report_path = tmp_path / "relatorio.html"
+
+    run_once(repo, census, records, UNIT, report_path, llm=None)
+
+    patient_id = _patient_id(repo, "100")
+    rows = {row["alvo"]: row for row in repo.get_patient_pending_items(patient_id)}
+    consult = rows["NEFROLOGIA"]
+    assert (consult["status"], consult["resolution_source"]) == ("RESOLVED", "DETECTOR")
+    assert consult["resolution_evidence"].startswith("PELA NEFROLOGIA Sem indicacao de dialise")  # o bloco inteiro
+    assert consult["resolution_evidence_date"] == "2026-08-21T10:00:00"
+    assert [e["event_type"] for e in repo.get_pending_item_events(consult["pending_id"])] == ["CRIADA", "CONCLUIDA"]
+    exam = rows["ULTRASSOM DE RINS E VIAS URINÁRIAS"]
+    assert exam["status"] == "ACTIVE"
+    content = report_path.read_text(encoding="utf-8")
+    assert "Concluídas recentemente" in content and "PELA NEFROLOGIA" in content
+    conn.close()
+
+
+class PunctureLLM(StubLLM):
+    """A IA registra "aguarda avaliação para punção venosa" a partir da
+    anotação de enfermagem -- o que o caso 3 do auditor descreve."""
+
+    def analyze_patient(self, previous_state, new_notes, active_pending_items=None, patient_context=None):
+        analysis = super().analyze_patient(previous_state, new_notes, active_pending_items, patient_context)
+        if not active_pending_items:
+            analysis["pending_items"] = [{
+                "category": "INTERCONSULTA", "subcategory": "SOLICITADA",
+                "description": "Aguarda avaliação para punção venosa",
+                "evidence": "Acionada equipe de puncao para avaliacao de puncao venosa.",
+                "evidence_date": "20/08/2026 08:00", "origin": None, "is_inferred": False,
+                "confidence": None, "flow_status": None, "alvo": None,
+            }]
+        return analysis
+
+
+def test_pipeline_pend001_caso3_puncture_done_never_shows_as_pending(tmp_path):
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    census = FixtureCensusSource([Patient(record_number="100", bed="2A", unit=UNIT)])
+    records = FixtureRecordSource({"100": "puncture_team_done.txt"})
+    report_path = tmp_path / "relatorio.html"
+
+    run_once(repo, census, records, UNIT, report_path, llm=PunctureLLM())
+
+    patient_id = _patient_id(repo, "100")
+    assert repo.get_active_pending_items(patient_id) == []
+    [row] = repo.get_patient_pending_items(patient_id)
+    assert (row["status"], row["resolution_source"]) == ("RESOLVED", "DETECTOR")
+    conn.close()
+
+
+class ExamDoneWithoutResultRecordSource(FixtureRecordSource):
+    TEXT = (
+        "20/08/2026 08:00 - Profissional Teste Um (Medico clinico)\nSolicitada tomografia de abdome.\n\n"
+        "21/08/2026 09:00 - Profissional Teste Um (Medico clinico)\nTomografia de abdome realizada.\n"
+    )
+
+    def get_raw_notes_text(self, patient, known_days=frozenset()) -> str:
+        return self.TEXT
+
+
+def test_pipeline_pend001_incomplete_evidence_goes_to_review_and_shows_in_report(tmp_path):
+    """Tabela de estados do auditor: exame realizado, resultado não
+    localizado -> "Em verificação pelo auditor" (continua no relatório)."""
+    conn = database.init_db(tmp_path / "auditoria.db")
+    repo = Repository(conn)
+    census = FixtureCensusSource([Patient(record_number="100", bed="2A", unit=UNIT)])
+    records = ExamDoneWithoutResultRecordSource({})
+    report_path = tmp_path / "relatorio.html"
+
+    run_once(repo, census, records, UNIT, report_path, llm=None)
+
+    [row] = repo.get_active_pending_items(_patient_id(repo, "100"))
+    assert row["status"] == "IN_REVIEW"
+    assert "Em verificação pelo auditor" in report_path.read_text(encoding="utf-8")
+    conn.close()
+
+
 def test_pipeline_without_llm_still_applies_deterministic_rules(tmp_path):
     """RULES-001 roda mesmo sem LLM configurado (ex.: modelo ainda não instalado)."""
     conn = database.init_db(tmp_path / "auditoria.db")
