@@ -111,6 +111,8 @@ KPI_CARDS = [
     ("dia_vermelho", "Dia vermelho hoje"),
 ]
 
+KPI_FOOTER_DEFAULT = "Consolidado da base local"
+
 KPI_SECONDARY = [
     ("without_edd", f"Sem EDD documentada\n({dashboard_metrics.EDD_PLAIN_NAME})"),
     ("dia_verde", "Dia verde hoje"),
@@ -141,7 +143,7 @@ CENSUS_COLUMNS = [
     ("pending_desc", "Pendência principal", 220),
     ("category", "Categoria", 150),
     ("priority", "Prioridade", 100),
-    ("pending_count", "Pendências", 80),
+    ("pending_count", "Pendências", 115),
     ("time", "Tempo", 80),
     ("edd", "EDD (prev. alta)", 125),
     ("dia", "Dia", 80),
@@ -290,6 +292,7 @@ class MainWindow:
         self._census_window_count_label: tk.Label | None = None
         self._census_window_sort_state: dict = {"column": None, "reverse": False}
         self._kpi_labels: dict[str, tk.Label] = {}
+        self._kpi_footers: dict[str, tk.Label] = {}
         self._refresh_job_id: str | None = None
 
         screen_width = root.winfo_screenwidth()
@@ -577,7 +580,9 @@ class MainWindow:
         ).pack(side="left", padx=(8, 0))
 
         for i, (key, title) in enumerate(KPI_CARDS):
-            frame.grid_columnconfigure(i, weight=1)
+            # Colunas iguais: o rodapé mais longo de um cartão não pode
+            # espremer os outros na janela mínima de 1024x700 (UI-010).
+            frame.grid_columnconfigure(i, weight=1, uniform="kpi")
             card = tk.Frame(frame, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
             card.grid(row=1, column=i, sticky="nsew", padx=(0 if i == 0 else 4, 0 if i == 3 else 4))
             body = tk.Frame(card, bg=CARD_BG)
@@ -599,10 +604,12 @@ class MainWindow:
             )
             value_label.pack(anchor="w", pady=(1, 4))
             tk.Frame(body, bg=CARD_BORDER, height=1).pack(fill="x")
-            tk.Label(
-                body, text="Consolidado da base local", font=(FONT_FAMILY, 8), fg=TEXT_MUTED, bg=CARD_BG,
-            ).pack(anchor="w", pady=(4, 0))
+            footer = tk.Label(
+                body, text=KPI_FOOTER_DEFAULT, font=(FONT_FAMILY, 8), fg=TEXT_MUTED, bg=CARD_BG,
+            )
+            footer.pack(anchor="w", pady=(4, 0))
             self._kpi_labels[key] = value_label
+            self._kpi_footers[key] = footer
 
         secondary = tk.Frame(frame, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
         secondary.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(7, 0))
@@ -1125,6 +1132,14 @@ class MainWindow:
         self._kpi_labels["with_pending"].config(
             text=f"{indicators.patients_with_active_pending} ({indicators.pct_patients_with_active_pending}%)"
         )
+        # PEND-001: quantas das pendências abertas aguardam conferência do
+        # auditor (continuam contadas no número de cima -- seguem abertas).
+        in_review = indicators.pending_in_review
+        self._kpi_footers["with_pending"].config(
+            # Curto de propósito: cabe no cartão na janela mínima (2ª revisão
+            # adversarial -- o texto longo cortava os quatro rodapés).
+            text=f"{in_review} pend. em verificação" if in_review else KPI_FOOTER_DEFAULT
+        )
         self._kpi_labels["without_edd"].config(
             text=f"{indicators.patients_without_edd} ({indicators.pct_patients_without_edd}%)"
         )
@@ -1359,16 +1374,24 @@ class MainWindow:
         for i, row in enumerate(rows):
             context = row.clinical_context or ""
             context_short = (context[:CONTEXT_MAX_CHARS] + "…") if len(context) > CONTEXT_MAX_CHARS else context
+            main_description = row.main_description or "Sem pendências identificadas"
+            if row.main_in_review:
+                main_description = dashboard_metrics.PENDING_IN_REVIEW_PREFIX + main_description
+            # PEND-001: "3 (1 em verif.)" -- a em verificação continua contando como aberta.
+            pending_count = (
+                f"{row.active_pending_count} ({row.pending_in_review_count} em verif.)"
+                if row.pending_in_review_count else row.active_pending_count
+            )
             values = (
                 row.bed,
                 row.record_number,
                 row.unit,
                 row.dih if row.dih is not None else "?",
                 context_short or ("—" if row.analyzed else AWAITING_AI_TEXT),
-                row.main_description or "Sem pendências identificadas",
+                main_description,
                 row.main_category or "—",
                 row.main_priority,
-                row.active_pending_count,
+                pending_count,
                 _format_hours(row.hours_elapsed),
                 _format_edd_cell(row.edd_status, row.edd_overdue, row.edd_inferred),
                 row.dia_classificacao or ("—" if row.analyzed else AWAITING_AI_TEXT),

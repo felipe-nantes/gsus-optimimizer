@@ -435,3 +435,59 @@ def test_count_display_fixes_sums_only_counts_over_active_patients(tmp_path):
     fixes = count_display_fixes(repo)
     assert fixes["pacientes"] == 1
     assert (fixes["rotina"], fixes["sinal_vital"], fixes["localizacao"], fixes["repeticao"]) == (1, 1, 1, 0)
+
+
+# ============================================================== PEND-001
+
+
+def test_in_review_items_stay_open_and_are_counted_apart(tmp_path):
+    from app.models import Patient
+    from app.reports import dashboard_metrics
+    from app.storage import database
+    from app.storage.repository import Repository
+
+    repo = Repository(database.init_db(tmp_path / "auditoria.db"))
+    patient_id = repo.upsert_patient(Patient(record_number="400", bed="1A", unit="UTI"))
+    repo.add_pending_item(patient_id, "TERAPEUTICA", "Aguarda desmame", "evid", "2026-08-20T08:00:00")
+    review = repo.add_pending_item(patient_id, "DIAGNOSTICO", "Aguarda TC", "evid", "2026-08-10T08:00:00")
+    repo.set_pending_in_review(review, actor="IA")
+
+    indicators = dashboard_metrics.compute_service_indicators(repo)
+    assert indicators.patients_with_active_pending == 1
+    assert sum(indicators.by_category.values()) == 2
+    assert indicators.pending_in_review == 1
+
+    [row] = dashboard_metrics.compute_patient_census_rows(repo)
+    assert row.active_pending_count == 2
+    assert row.pending_in_review_count == 1
+    # Prioridade primeiro (revisão adversarial): a em verificação mais antiga
+    # (prioridade maior) é a principal -- marcada como em verificação.
+    assert row.main_description == "Aguarda TC"
+    assert row.main_in_review is True
+
+
+def test_closure_labels():
+    from app.reports import dashboard_metrics as dm
+
+    assert dm.closure_label("RESOLVED", "DETECTOR") == "Concluída automaticamente"
+    assert dm.closure_label("RESOLVED", "IA") == "Concluída automaticamente"
+    assert dm.closure_label("RESOLVED", "AUDITOR") == "Concluída pelo auditor"
+    assert dm.closure_label("CANCELLED", "IA") == "Cancelada"
+    assert dm.RECENTLY_CLOSED_DAYS == 3  # padrão interno até a resposta do auditor (pergunta 3c)
+
+
+def test_resolution_time_uses_the_chart_dates_when_known(tmp_path):
+    """Revisão adversarial: pedido respondido entre duas execuções era criado
+    e fechado na mesma passada e entrava como 0 h na mediana."""
+    from app.models import Patient
+    from app.reports import dashboard_metrics
+    from app.storage import database
+    from app.storage.repository import Repository
+
+    repo = Repository(database.init_db(tmp_path / "auditoria.db"))
+    patient_id = repo.upsert_patient(Patient(record_number="500", bed="1A", unit="U"))
+    pending_id = repo.add_pending_item(patient_id, "INTERCONSULTA", "Aguarda nefro", "Solicito nefro.",
+                                       "2026-08-20T08:00:00", source="RULE")
+    repo.resolve_pending_item(pending_id, source="DETECTOR", evidence="PELA NEFROLOGIA",
+                              evidence_date="2026-08-20T15:00:00")
+    assert dashboard_metrics.compute_service_indicators(repo).median_resolution_hours == 7.0

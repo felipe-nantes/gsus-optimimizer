@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from app.analysis.clinical_filters import build_display_summary, clean_text
 from app.analysis.priority import (
@@ -36,7 +36,10 @@ from app.analysis.priority import (
     hours_elapsed_since,
     is_edd_overdue,
 )
-from app.storage.repository import Repository
+from app.storage.repository import (
+    PENDING_CANCELLED, PENDING_IN_REVIEW, RESOLUTION_AUDITOR, RESOLUTION_DETECTOR, RESOLUTION_LEGACY,
+    RESOLUTION_LLM, RESOLUTION_RULE, Repository,
+)
 
 # Ordem de gravidade (RF-24) -- reusado tanto aqui (pendência principal por
 # paciente) quanto pela tabela de censo da tela única (REPORT-004, ordenação
@@ -51,6 +54,53 @@ PRIORITY_RANK = {PRIORITY_ALTA: 3, PRIORITY_MEDIA: 2, PRIORITY_MONITORAMENTO: 1}
 EDD_PLAIN_NAME = "data provável de alta"
 EDD_OVERDUE_LABEL = f"EDD vencida ({EDD_PLAIN_NAME})"
 EDD_MISSING_LABEL = f"Sem EDD documentada ({EDD_PLAIN_NAME})"
+
+# PEND-001 (pedido do auditor, DEC-129 seção 3): nomes dos estados como o
+# auditor os escreveu -- um lugar só pra relatório, dashboard e (PEND-002)
+# a janela de revisão.
+PENDING_IN_REVIEW_LABEL = "Em verificação pelo auditor"
+# Marcador NO COMEÇO do texto da pendência principal (tabela e censo): no
+# fim, a coluna estreita da dashboard cortava o aviso (revisão adversarial).
+PENDING_IN_REVIEW_PREFIX = "[Em verificação] "
+PENDING_RESOLVED_AUTO_LABEL = "Concluída automaticamente"
+PENDING_RESOLVED_AUDITOR_LABEL = "Concluída pelo auditor"
+PENDING_CANCELLED_LABEL = "Cancelada"
+RESOLUTION_SOURCE_LABELS = {
+    RESOLUTION_LLM: "pela IA",
+    RESOLUTION_DETECTOR: "pelo sistema, com a evolução que comprova",
+    RESOLUTION_RULE: "pelo sistema",
+    RESOLUTION_LEGACY: "em versão anterior do programa",
+}
+# Pergunta 3c ao auditor: por quantos dias uma pendência encerrada continua
+# visível no relatório. Padrão interno até a resposta dele (DEC-129).
+RECENTLY_CLOSED_DAYS = 3
+
+
+def closure_label(status: str, resolution_source: str | None) -> str:
+    if status == PENDING_CANCELLED:
+        return PENDING_CANCELLED_LABEL
+    if resolution_source == RESOLUTION_AUDITOR:
+        return PENDING_RESOLVED_AUDITOR_LABEL
+    return PENDING_RESOLVED_AUTO_LABEL
+
+
+def main_pending_sort_key(item: dict):
+    """Pendência principal do paciente: a de maior prioridade; empatada, a
+    ATIVA antes da "em verificação"; depois a mais antiga. Mesmo critério no
+    relatório e na dashboard. Prioridade vem primeiro (revisão adversarial):
+    com o estado na frente, um item em verificação de prioridade ALTA ficava
+    escondido atrás de um MONITORAMENTO ativo, e o censo por paciente
+    discordava do censo por unidade."""
+    return (
+        -PRIORITY_RANK.get(item["_priority"], 0),
+        item.get("status") == PENDING_IN_REVIEW,
+        -(item["_hours_elapsed"] or 0),
+    )
+
+
+def recently_closed_cutoff_iso(now: datetime | None = None) -> str:
+    reference = now or datetime.now(timezone.utc)
+    return (reference - timedelta(days=RECENTLY_CLOSED_DAYS)).isoformat()
 
 
 @dataclass
@@ -70,6 +120,9 @@ class ServiceIndicators:
     patients_dia_vermelho: int = 0
     patients_dia_verde: int = 0
     dia_causa_counts: dict[str, int] = field(default_factory=dict)
+    # PEND-001: pendências abertas "em verificação pelo auditor" (entram em
+    # todas as contagens acima -- continuam abertas -- e aparecem à parte).
+    pending_in_review: int = 0
 
 
 @dataclass
@@ -113,6 +166,11 @@ class PatientCensusRow:
     analyzed: bool = False
     # EDD-001: a EDD veio de uma previsão relativa escrita na evolução.
     edd_inferred: bool = False
+    # PEND-001: quantas das pendências abertas estão em verificação, e se a
+    # principal é uma delas (a principal é a de maior prioridade; empatada, a
+    # ativa vem antes da em verificação).
+    pending_in_review_count: int = 0
+    main_in_review: bool = False
 
 
 def compute_patient_census_rows(repo: Repository) -> list[PatientCensusRow]:
@@ -130,10 +188,7 @@ def compute_patient_census_rows(repo: Repository) -> list[PatientCensusRow]:
     for patient in all_patients:
         patient_id = patient["patient_id"]
         state = state_by_patient.get(patient_id)
-        items = sorted(
-            items_by_patient.get(patient_id, []),
-            key=lambda it: (-PRIORITY_RANK.get(it["_priority"], 0), -(it["_hours_elapsed"] or 0)),
-        )
+        items = sorted(items_by_patient.get(patient_id, []), key=main_pending_sort_key)
         main = items[0] if items else None
         edd_status = state["edd_status"] if state else None
         edd_data = state["edd_data"] if state else None
@@ -157,6 +212,8 @@ def compute_patient_census_rows(repo: Repository) -> list[PatientCensusRow]:
             dia_classificacao=state["dia_classificacao"] if state else None,
             analyzed=state is not None,
             edd_inferred=bool(state["edd_inferida"]) if state else False,
+            pending_in_review_count=sum(1 for it in items if it["status"] == PENDING_IN_REVIEW),
+            main_in_review=bool(main and main["status"] == PENDING_IN_REVIEW),
         ))
     return rows
 
@@ -267,6 +324,7 @@ def compute_service_indicators(repo: Repository) -> ServiceIndicators:
         patients_dia_vermelho=patients_dia_vermelho,
         patients_dia_verde=patients_dia_verde,
         dia_causa_counts=dia_causa_counts,
+        pending_in_review=sum(1 for item in annotated_items if item["status"] == PENDING_IN_REVIEW),
     )
 
 
@@ -305,9 +363,17 @@ def compute_unit_census(repo: Repository) -> list[UnitCensusRow]:
 
 
 def _resolution_hours(pending_row) -> float | None:
-    """Horas entre `created_at` e `resolved_at` -- os dois em UTC-aware
-    (`Repository._now()`), diferente de `evidence_date` (naive/local,
-    DEC-065) -- nunca misturar os dois regimes de fuso."""
+    """Horas até a resolução. Com as duas datas do prontuário (pedido e
+    evidência de conclusão, ambas locais, sem fuso -- PEND-001): a diferença
+    entre elas, o tempo real. Achado da revisão adversarial: medindo
+    `created_at` -> `resolved_at`, todo pedido respondido entre duas
+    execuções (criado e fechado na mesma passada) entrava como 0 h e puxava
+    a mediana pra zero. Sem as duas: `created_at` -> `resolved_at`, ambos
+    UTC-aware (`Repository._now()`) -- nunca misturar os dois regimes."""
+    request = _parse_naive(pending_row["evidence_date"])
+    evidence = _parse_naive(pending_row["resolution_evidence_date"])
+    if request is not None and evidence is not None:
+        return max((evidence - request).total_seconds() / 3600, 0.0)
     if not pending_row["resolved_at"] or not pending_row["created_at"]:
         return None
     try:
@@ -316,6 +382,16 @@ def _resolution_hours(pending_row) -> float | None:
     except ValueError:
         return None
     return max((resolved - created).total_seconds() / 3600, 0.0)
+
+
+def _parse_naive(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+    return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
 
 
 def _median(values: list[float]) -> float | None:

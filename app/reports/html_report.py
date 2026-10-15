@@ -19,13 +19,11 @@ import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from app.analysis.priority import (
-    PRIORITY_ALTA, PRIORITY_MEDIA, compute_priority, days_since_admission, hours_elapsed_since, is_edd_overdue,
-)
+from app.analysis.priority import compute_priority, days_since_admission, hours_elapsed_since, is_edd_overdue
 from app.analysis.clinical_filters import build_display_summary, clean_text
 from app.analysis.sla_config import get_sla_hours
 from app.reports import dashboard_metrics
-from app.storage.repository import Repository
+from app.storage.repository import PENDING_IN_REVIEW, Repository
 
 ORIGIN_LABELS = {"INTERNA": "interna", "EXTERNA": "externa"}
 CONFIDENCE_LABELS = {"ALTA": "alta", "MEDIA": "média", "BAIXA": "baixa"}
@@ -84,6 +82,15 @@ h2 { letter-spacing: -.015em; }
 .no-pending { color: var(--success); }
 .inferred-tag, .origin-tag, .main-tag { display: inline-block; font-size: 10px; border-radius: 999px; padding: 2px 7px; margin-left: 6px; }
 .main-tag { color: #fff; background: var(--accent); font-weight: 650; }
+/* PEND-001: estados da pendência (pedido do auditor, DEC-129 seção 3) */
+.review-tag, .closed-tag { display: inline-block; font-size: 10px; border-radius: 999px; padding: 2px 7px; margin-left: 6px; font-weight: 650; }
+.review-tag { color: #6b4e00; background: #ffe9a8; }
+.pending.in-review { border-left-color: #c79a00; background: #fffbea; }
+.pending .review-note { color: #6b4e00; font-size: 12px; margin-top: 4px; }
+.pending.closed { border-left-color: var(--success); background: #f1f8f3; }
+.pending.closed.cancelled { border-left-color: #9a9ba0; background: #f4f4f5; }
+.closed-tag { color: var(--success); background: #e3f2e7; }
+.pending.closed.cancelled .closed-tag { color: #4c4d52; background: #e7e7e9; }
 .original-text { margin: 8px 0 4px; font-size: 12px; color: var(--muted); }
 .original-text summary { cursor: pointer; }
 .original-text p { margin: 4px 0; }
@@ -181,18 +188,36 @@ def _annotate_priority(pending_row: dict, necessidade_hospitalar: str | None, re
     """Recalcula tempo decorrido e prioridade agora, na leitura -- não usa
     o snapshot gravado no momento da criação (ver módulo docstring). Também
     busca reiterações (DEC-062, seção 15 da orientação: "EVIDÊNCIA 1/
-    EVIDÊNCIA 2") -- a primeira evidência já fica no próprio `pending_row`."""
+    EVIDÊNCIA 2") -- a primeira evidência já fica no próprio `pending_row` --
+    e, se a pendência está em verificação, o motivo (PEND-001)."""
     hours = hours_elapsed_since(pending_row["evidence_date"])
     priority = compute_priority(pending_row["category"], necessidade_hospitalar, hours)
     extra_evidence = repo.get_pending_item_evidence(pending_row["pending_id"])
-    return {**pending_row, "_hours_elapsed": hours, "_priority": priority, "_extra_evidence": extra_evidence}
-
-
-_PRIORITY_ORDER = {PRIORITY_ALTA: 0, PRIORITY_MEDIA: 1}
+    review_event = (
+        repo.get_last_review_event(pending_row["pending_id"])
+        if pending_row.get("status") == PENDING_IN_REVIEW else None
+    )
+    return {
+        **pending_row, "_hours_elapsed": hours, "_priority": priority, "_extra_evidence": extra_evidence,
+        "_review_note": review_event["note"] if review_event else None,
+    }
 
 
 def _sort_key(item: dict):
-    return (_PRIORITY_ORDER.get(item["_priority"], 2), -(item["_hours_elapsed"] or 0))
+    return dashboard_metrics.main_pending_sort_key(item)
+
+
+def _format_utc_br(value: str | None) -> str:
+    """`resolved_at` é UTC (gravado pelo sistema) -- mostra no horário local."""
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().strftime("%d/%m/%Y %H:%M")
 
 
 def generate_report(repo: Repository, run_id: str, unit: str, output_path: Path) -> Path:
@@ -220,6 +245,9 @@ def generate_report(repo: Repository, run_id: str, unit: str, output_path: Path)
     by_patient: dict[str, list[dict]] = {}
     for row in pending_rows:
         by_patient.setdefault(row["patient_id"], []).append(dict(row))
+    closed_by_patient: dict[str, list] = {}
+    for row in repo.get_recently_closed_pending_items(dashboard_metrics.recently_closed_cutoff_iso()):
+        closed_by_patient.setdefault(row["patient_id"], []).append(row)
 
     state_by_patient = {
         row["patient_id"]: row for row in repo.conn.execute("SELECT * FROM patient_state").fetchall()
@@ -250,7 +278,10 @@ def generate_report(repo: Repository, run_id: str, unit: str, output_path: Path)
         annotated_items = annotated_by_patient[patient_id]
 
         census_rows.append(_render_census_row(bed, patient_unit, admission_date, state, annotated_items))
-        beds_html.append(_render_bed(bed, record_number, patient_unit, admission_date, state, annotated_items))
+        beds_html.append(_render_bed(
+            bed, record_number, patient_unit, admission_date, state, annotated_items,
+            closed_by_patient.get(patient_id, ()),
+        ))
 
     # RF-29 (auditoria de certificação pré-entrega, 2026-09-01): os
     # indicadores agregados do serviço existiam desde a Fase 1 da dashboard
@@ -348,9 +379,13 @@ def generate_patient_report(repo: Repository, record_number: str) -> str | Patie
         (_annotate_priority(dict(row), necessidade, repo) for row in pending_rows), key=_sort_key
     )
 
+    closed_items = [
+        row for row in repo.get_recently_closed_pending_items(dashboard_metrics.recently_closed_cutoff_iso())
+        if row["patient_id"] == patient_id
+    ]
     bed_html = _render_bed(
         patient_row["bed"] or "?", record_number, patient_row["unit"] or "?",
-        patient_row["admission_date"], state, annotated_items,
+        patient_row["admission_date"], state, annotated_items, closed_items,
     )
 
     return f"""<!doctype html>
@@ -434,6 +469,8 @@ def _render_census_row(bed: str, unit: str, admission_date: str | None, state, a
     if annotated_items:
         main = annotated_items[0]
         pending_desc = main["description"]
+        if main.get("status") == PENDING_IN_REVIEW:
+            pending_desc = dashboard_metrics.PENDING_IN_REVIEW_PREFIX + pending_desc
         category = main["category"]
         priority = main["_priority"]
         time_label = _format_hours(main["_hours_elapsed"])
@@ -494,7 +531,7 @@ def _render_service_indicators(
   <div class="stat"><span class="n">{pct.pct_patients_with_active_pending}%</span>Com pendência ativa</div>
   <div class="stat"><span class="n">{pct.pct_patients_without_edd}%</span>{dashboard_metrics.EDD_MISSING_LABEL}</div>
   <div class="stat"><span class="n">{pct.pct_patients_with_edd_overdue}%</span>{dashboard_metrics.EDD_OVERDUE_LABEL}</div>
-  <div class="stat compact"><span class="n">{_format_median_hours(pct.median_resolution_hours)}</span>Tempo mediano de resolução<small>horas entre o registro da pendência pela auditoria e sua resolução nas evoluções</small></div>
+  <div class="stat compact"><span class="n">{_format_median_hours(pct.median_resolution_hours)}</span>Tempo mediano de resolução<small>horas entre o pedido na evolução e a evidência de conclusão (sem essas datas: entre o registro e o encerramento)</small></div>
   <div class="stat dia-vermelho"><span class="n">{pct.patients_dia_vermelho}</span>Dia vermelho hoje</div>
   <div class="stat dia-verde"><span class="n">{pct.patients_dia_verde}</span>Dia verde hoje</div>
 </div>"""
@@ -552,7 +589,8 @@ def _render_service_indicators(
 
 
 def _render_bed(
-    bed: str, record_number: str, unit: str, admission_date: str | None, state, annotated_items: list[dict]
+    bed: str, record_number: str, unit: str, admission_date: str | None, state, annotated_items: list[dict],
+    closed_items=(),
 ) -> str:
     dih = _dih(admission_date)
     dih_label = f"{dih}º DIH" if dih is not None else "DIH não determinado"
@@ -633,6 +671,12 @@ def _render_bed(
         )
     else:
         all_pending_html = '<p class="no-pending">Sem pendências identificadas.</p>'
+    if closed_items:
+        all_pending_html += (
+            f'<div class="section-label">Concluídas recentemente (últimos '
+            f'{dashboard_metrics.RECENTLY_CLOSED_DAYS} dias)</div>'
+            + "".join(_render_closed(item) for item in closed_items)
+        )
 
     # Identificação operacional (seção 2A da orientação técnica): só exibe
     # se pelo menos um dos dois for conhecido -- dado que nem toda análise
@@ -737,9 +781,52 @@ def _render_pending(item: dict, is_main: bool = False) -> str:
         meta_parts.append(f"fluxo: {item['flow_status']}")
     meta_line = f'<div class="meta-line">{html.escape(" · ".join(meta_parts))}</div>'
 
-    return f"""<div class="pending">
-  <div class="category">{html.escape(item['category'])} — {html.escape(item['description'])}{main_tag}{inferred_tag}{origin_tag}</div>
+    # PEND-001: "Em verificação pelo auditor" -- aberta, mas sem evidência
+    # suficiente pra decidir; o motivo vem do histórico da pendência.
+    in_review = item.get("status") == PENDING_IN_REVIEW
+    review_tag = (
+        f'<span class="review-tag">{html.escape(dashboard_metrics.PENDING_IN_REVIEW_LABEL)}</span>' if in_review else ""
+    )
+    review_note = item.get("_review_note")
+    review_note_html = (
+        f'<div class="review-note">Motivo: {html.escape(review_note)}</div>' if in_review and review_note else ""
+    )
+    css_class = "pending in-review" if in_review else "pending"
+
+    return f"""<div class="{css_class}">
+  <div class="category">{html.escape(item['category'])} — {html.escape(item['description'])}{main_tag}{review_tag}{inferred_tag}{origin_tag}</div>
+  {review_note_html}
   {first_evidence_html}
   {extra_evidence_html}
   {meta_line}
+</div>"""
+
+
+def _render_closed(item) -> str:
+    """Pendência encerrada há pouco (PEND-001, pergunta 3c ao auditor): fica
+    visível alguns dias, com quem encerrou, quando e com que evidência --
+    "sem perder o histórico" (caso 7 de aceitação)."""
+    label = dashboard_metrics.closure_label(item["status"], item["resolution_source"])
+    if item["resolution_source"] == "AUDITOR":
+        who = f"por {item['resolved_by']}" if item["resolved_by"] else ""
+    else:
+        who = dashboard_metrics.RESOLUTION_SOURCE_LABELS.get(item["resolution_source"], "")
+    tag_text = f"{label} {who}".strip()
+    evidence_html = ""
+    if item["resolution_evidence"]:
+        when = _format_datetime_br(item["resolution_evidence_date"])
+        evidence_html = (
+            f'<div class="evidence">Evidência{f": {html.escape(when)}" if when else ""} — '
+            f'&ldquo;{html.escape(item["resolution_evidence"])}&rdquo;</div>'
+        )
+    # Quando o SISTEMA encerrou (closed_at) -- a data da evidência já aparece
+    # acima; a revisão mostrou que misturar as duas confundia o auditor.
+    meta_parts = [f"encerrada em {_format_utc_br(item['closed_at'] or item['resolved_at'])}"]
+    if item["evidence_date"]:
+        meta_parts.append(f"pedido de {_format_datetime_br(item['evidence_date'])}")
+    css_class = "pending closed cancelled" if item["status"] == "CANCELLED" else "pending closed"
+    return f"""<div class="{css_class}">
+  <div class="category">{html.escape(item['category'])} — {html.escape(item['description'])}<span class="closed-tag">{html.escape(tag_text)}</span></div>
+  {evidence_html}
+  <div class="meta-line">{html.escape(" · ".join(meta_parts))}</div>
 </div>"""

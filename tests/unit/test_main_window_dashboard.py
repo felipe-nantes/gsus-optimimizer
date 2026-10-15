@@ -495,3 +495,29 @@ def test_census_tree_says_awaiting_ai_instead_of_a_dash_for_unanalyzed_patient(t
         assert window._kpi_labels["median_resolution"]["text"] == "sem histórico ainda"
     finally:
         root.destroy()
+
+
+def test_with_pending_card_footer_counts_items_in_review(tmp_path, monkeypatch):
+    """PEND-001: as em verificação seguem abertas (contam no número de cima)
+    e aparecem no rodapé do cartão."""
+    monkeypatch.setenv("GSUS_AUDITORIA_DATA_DIR", str(tmp_path / "GSUSAuditoria"))
+    urgent, _calm = _seed_two_patients()
+    conn = database.init_db(config.get_db_path())
+    repo = Repository(conn)
+    [row] = repo.get_active_pending_items(urgent)
+    repo.set_pending_in_review(row["pending_id"], actor="IA")
+    conn.close()
+
+    root = tk.Tk()
+    try:
+        window = MainWindow(root, config.AppConfig(configured=True, unit="2A"))
+        root.update()
+        assert window._kpi_labels["with_pending"]["text"] == "1 (50.0%)"
+        assert window._kpi_footers["with_pending"]["text"] == "1 pend. em verificação"
+        assert window._kpi_footers["total_active"]["text"] == "Consolidado da base local"
+        values = window._census_tree.item("100", "values")
+        columns = list(window._census_tree["columns"])
+        assert values[columns.index("pending_desc")] == "[Em verificação] Aguarda cirurgia"
+        assert values[columns.index("pending_count")] == "1 (1 em verif.)"
+    finally:
+        root.destroy()

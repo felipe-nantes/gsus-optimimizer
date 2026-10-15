@@ -539,3 +539,96 @@ def test_report_still_says_not_defined_when_the_ai_left_a_field_empty(tmp_path):
     )
     content = generate_report(repo, run_id, "Auditoria", tmp_path / "relatorio.html").read_text(encoding="utf-8")
     assert content.count("(não definido)") == 2
+
+
+# ============================================================== PEND-001
+# Estados da pendência no relatório (pedido do auditor, DEC-129 seção 3).
+
+
+def _report_with_items(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    repo = _setup_repo(tmp_path)
+    patient_id = repo.upsert_patient(Patient(record_number="300", bed="7A", unit="Clínica Médica"))
+    run_id = repo.start_run()
+    repo.enqueue_patients(run_id, [patient_id])
+    repo.mark_processing(run_id, patient_id)
+    repo.mark_done(run_id, patient_id)
+    repo.save_patient_state(patient_id, "Contexto.", "Estável.")
+    repo.add_pending_item(patient_id, "TERAPEUTICA", "Aguarda desmame de oxigênio",
+                          "Mantém O2 por cateter.", "2026-08-20T08:00:00", source="LLM")
+    review = repo.add_pending_item(patient_id, "DIAGNOSTICO", "Aguarda tomografia de crânio",
+                                   "Solicitada TC de crânio.", "2026-08-19T08:00:00", source="LLM")
+    repo.set_pending_in_review(review, actor="DETECTOR", note="exame realizado, mas o resultado não foi localizado")
+    now = datetime.now(timezone.utc)
+    done = repo.add_pending_item(patient_id, "INTERCONSULTA", "Aguarda avaliação da infectologia",
+                                 "Solicito avaliação da infectologia.", "2026-08-20T08:00:00", source="LLM")
+    repo.resolve_pending_item(done, source="DETECTOR", evidence="PELA INFECTOLOGIA",
+                              evidence_date="2026-08-21T09:30:00", resolved_at=(now - timedelta(days=1)).isoformat())
+    cancelled = repo.add_pending_item(patient_id, "DIAGNOSTICO", "Aguarda ultrassom de abdome",
+                                      "Solicitado USG.", "2026-08-20T08:00:00", source="LLM")
+    repo.cancel_pending_item(cancelled, source="IA", evidence="USG suspenso por mudança de conduta.")
+    old = repo.add_pending_item(patient_id, "INTERCONSULTA", "Aguarda avaliação da nefrologia",
+                                "Solicito nefro.", "2026-08-01T08:00:00", source="LLM")
+    repo.resolve_pending_item(old, source="DETECTOR", evidence="PELA NEFROLOGIA",
+                              resolved_at=(now - timedelta(days=10)).isoformat())
+    # Encerrada PELO SISTEMA há 10 dias (closed_at), não só com evidência antiga.
+    repo.conn.execute("UPDATE pending_items SET closed_at = ? WHERE pending_id = ?",
+                      ((now - timedelta(days=10)).isoformat(), old))
+    repo.conn.commit()
+    backdated = repo.add_pending_item(patient_id, "INTERCONSULTA", "Aguarda avaliação da cardiologia",
+                                      "Solicito cardio.", "2026-08-01T08:00:00", source="LLM")
+    repo.resolve_pending_item(backdated, source="DETECTOR", evidence="PELA CARDIOLOGIA",
+                              evidence_date="2026-08-02T09:00:00", resolved_at=(now - timedelta(days=9)).isoformat())
+    content = generate_report(repo, run_id, "Clínica Médica", tmp_path / "relatorio.html").read_text(encoding="utf-8")
+    return repo, patient_id, content
+
+
+def test_report_shows_in_review_badge_with_its_reason(tmp_path):
+    _repo, _pid, content = _report_with_items(tmp_path)
+    assert '<span class="review-tag">Em verificação pelo auditor</span>' in content
+    assert "Motivo: exame realizado, mas o resultado não foi localizado" in content
+
+
+def test_report_main_pending_is_the_highest_priority_even_in_review(tmp_path):
+    """Revisão adversarial: com o estado à frente da prioridade, um item ALTA
+    em verificação ficava escondido atrás de um MONITORAMENTO ativo."""
+    _repo, _pid, content = _report_with_items(tmp_path)
+    census = content.split('<div class="census">')[1].split("</table>")[0]
+    assert "[Em verificação] Aguarda tomografia de crânio" in census
+
+
+def test_report_lists_recently_closed_items_with_who_when_and_evidence(tmp_path):
+    """Caso 7 de aceitação (parte do relatório): concluir não apaga -- a
+    pendência encerrada fica visível com o histórico por alguns dias."""
+    _repo, _pid, content = _report_with_items(tmp_path)
+    assert "Concluídas recentemente (últimos 3 dias)" in content
+    closed = content.split("Concluídas recentemente")[1]
+    assert "Aguarda avaliação da infectologia" in closed
+    assert "Concluída automaticamente pelo sistema, com a evolução que comprova" in closed
+    assert "Evidência: 21/08/2026 09:30 — &ldquo;PELA INFECTOLOGIA&rdquo;" in closed
+    assert "Aguarda ultrassom de abdome" in closed and "Cancelada pela IA" in closed
+    assert "Aguarda avaliação da nefrologia" not in content  # encerrada pelo sistema há 10 dias
+    # Revisão adversarial: fechada HOJE com evidência antiga aparece -- antes
+    # sumia sem rastro (o filtro usava a data da evidência).
+    assert "Aguarda avaliação da cardiologia" in closed
+
+
+def test_patient_report_also_shows_states_and_recently_closed(tmp_path):
+    from app.reports.html_report import generate_patient_report
+
+    repo, _pid, _content = _report_with_items(tmp_path)
+    content = generate_patient_report(repo, "300")
+    assert "Em verificação pelo auditor" in content
+    assert "Concluídas recentemente" in content and "PELA INFECTOLOGIA" in content
+
+
+def test_census_row_marks_main_pending_in_review_when_all_are(tmp_path):
+    repo = _setup_repo(tmp_path)
+    patient_id = repo.upsert_patient(Patient(record_number="301", bed="7B", unit="Clínica Médica"))
+    run_id = repo.start_run()
+    pending = repo.add_pending_item(patient_id, "DIAGNOSTICO", "Aguarda tomografia", "Solicitada TC.",
+                                    "2026-08-20T08:00:00", source="LLM")
+    repo.set_pending_in_review(pending, actor="IA")
+    content = generate_report(repo, run_id, "Clínica Médica", tmp_path / "relatorio.html").read_text(encoding="utf-8")
+    assert "[Em verificação] Aguarda tomografia" in content
