@@ -1496,3 +1496,5 @@ Nenhum teste executa `shutdown.exe`: há runner falso e uma trava que recusa o c
 - Aprovação do usuário e push da Fase 3 (commits locais feitos).
 - PROJECT_SPEC (RF-23/RF-30) depois da aprovação.
 - Fase 4 (PEND-002): confirmar 4a/4b com o usuário antes.
+
+**Depois:** Fase 3 aprovada pelo usuário em 2026-10-15 e enviada ao GitHub (`fdd99f1`), com o RF-23 reformulado no PROJECT_SPEC (o RF-30 muda com a Fase 4). Respostas do usuário: 4a "Sim" (um auditor por PC, nome nas Configurações); 4b "Data que o auditor marcou. Deixe sinalizado que foi o auditor que marcou." (registradas no DEC-129).

@@ -994,7 +994,9 @@ mínimos de aceitação da seção 7 (cada um vira teste nomeado).
                    em verificação diz "confirme no aplicativo".
                  Testes: repositório (transação, eventos, condicionais), Tk (abrir, resolver,
                  reabrir, cancelar diálogo), relatório, dashboard recalculada, proteções na
-                 análise seguinte. Pergunta 4 do DEC-129.
+                 análise seguinte. Pergunta 4 do DEC-129 RESPONDIDA (2026-10-15): um auditor por
+                 PC (nome nas Configurações); no tempo de resolução vale a data em que o auditor
+                 marcou, sempre sinalizada como marcação do auditor.
 [ ] EDD-002      Fase 5 -- Data provável de alta buscada na evolução MÉDICA (seção 8): `edd.py`
                  só considera notas MEDICA (`sources.py`); dentro da nota, o bloco "Diagnóstico
                  Descritivo" (até "Queixa Principal" ou o próximo rótulo do formulário) vem antes

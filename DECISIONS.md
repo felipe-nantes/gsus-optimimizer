@@ -2725,3 +2725,9 @@ Ficam para confirmar com o usuário ao começar a fase, porque a pergunta oferec
 - Aprovação do usuário e push.
 - Validação real na 1.6.0 (ACCEPT-001): a primeira execução depois da migração deve mostrar no log os totais (fechadas pelo detector, em verificação, alvos preenchidos), e o auditor confere os itens "Em verificação".
 - Confirmar 4a/4b antes da Fase 4 e 5c/5d/5f antes da Fase 5.
+
+**Fase 3 aprovada pelo usuário (2026-10-15)** e enviada ao GitHub (`fdd99f1`), com o RF-23 reformulado no PROJECT_SPEC (5 estados, encerramento só com prova documental posterior ao pedido, histórico só de acréscimo, tempo pelas datas do prontuário). O RF-30 muda com a Fase 4, que entrega a confirmação manual.
+
+**Respostas do usuário às perguntas da Fase 4 (2026-10-15):**
+- **4a — um auditor por PC:** "Sim". O nome do auditor fica nas Configurações (`AppConfig`), perguntado uma vez se estiver vazio, e vai em cada ação manual junto com o usuário do Windows.
+- **4b — data no tempo de resolução:** "Data que o auditor marcou. Deixe sinalizado que foi o auditor que marcou." Pendência concluída pelo auditor conta, no tempo de resolução, do pedido até a data/hora da marcação; relatório e dashboard dizem que essa data é a da marcação pelo auditor (não a de uma evidência do prontuário).
